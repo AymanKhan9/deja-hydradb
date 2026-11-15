@@ -11,7 +11,13 @@ TE = retr.embed(None, "data/tool_emb.npy"); Q = retr.embed(None, "data/q_emb.npy
 order = list(range(len(tasks))); random.Random(1).shuffle(order)
 train, held = [tasks[i] for i in order[:-HOLDOUT]], order[-HOLDOUT:]
 retr.Learned.Q = Q; HydraLearned.tool_names = {hid("tool", n): n for n in cat}
-L = HydraLearned(); t0 = time.time(); nt, nl, nc = L.bulk_load(train)
+from neo4j.exceptions import ServiceUnavailable, NotALeader
+for attempt in range(60):   # after a reboot HydraDB holds the old write lease for ~30 s; wait instead of crash-looping
+    try:
+        L = HydraLearned(); t0 = time.time(); nt, nl, nc = L.bulk_load(train); break
+    except (ServiceUnavailable, NotALeader) as e:
+        print(f"HydraDB not writable yet ({type(e).__name__}), retrying", flush=True); time.sleep(5)
+else: raise SystemExit("HydraDB never became writable")
 print(f"graph loaded: {nt} task nodes, {nl} term links, {nc} co-use links in {time.time()-t0:.0f}s", flush=True)
 presets = [{"id": i, "q": tasks[i]["q"], "multi": len(tasks[i]["gold_servers"]) > 1} for i in held]; EXAMPLES = []
 from fastembed import TextEmbedding

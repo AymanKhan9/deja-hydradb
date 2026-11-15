@@ -17,7 +17,9 @@ sudo tee /etc/systemd/system/deja.service >/dev/null <<UNIT
 [Unit]
 Description=Deja server
 After=docker.service
+StartLimitIntervalSec=0
 [Service]
+RestartSec=5
 User=$USER
 WorkingDirectory=$HOME/deja
 Environment=OMP_NUM_THREADS=1 PORT=8090 PATH=$HOME/.local/bin:/usr/bin:/bin
