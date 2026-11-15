@@ -29,6 +29,8 @@ UNIT
 sudo systemctl daemon-reload && sudo systemctl enable --now deja && sudo systemctl restart deja
 # Oracle Ubuntu images ship an iptables REJECT rule: allow 80 and redirect it to the app
 sudo iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || sudo iptables -I INPUT 5 -p tcp --dport 80 -j ACCEPT
+# REDIRECT runs in PREROUTING, so INPUT sees the rewritten port: allow 8090 too
+sudo iptables -C INPUT -p tcp --dport 8090 -j ACCEPT 2>/dev/null || sudo iptables -I INPUT 5 -p tcp --dport 8090 -j ACCEPT
 sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8090 2>/dev/null || sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8090
 command -v netfilter-persistent >/dev/null && sudo netfilter-persistent save || true
 echo "started; first boot loads the graph + held-out check (~2-3 min): journalctl -u deja -f"

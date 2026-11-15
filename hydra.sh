@@ -16,7 +16,7 @@ if ! docker ps --format '{{.Names}}' | grep -qx hydradb-s3; then
     rustfs/rustfs:1.0.4 /data >/dev/null
   sleep 3
 fi
-uv run -q --with boto3 python -c "
+uv run -q --no-project --with boto3 python -c "
 import boto3; s3 = boto3.client('s3', endpoint_url='http://127.0.0.1:9000', aws_access_key_id='$KEY', aws_secret_access_key='$SECRET', region_name='us-east-1')
 if '$BUCKET' not in [b['Name'] for b in s3.list_buckets()['Buckets']]: s3.create_bucket(Bucket='$BUCKET')"
 ENV=(-e CLOUD_PROVIDER=aws -e AWS_BUCKET_NAME="$BUCKET" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ALLOW_HTTP=true
