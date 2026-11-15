@@ -73,7 +73,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)               tools used together in one task</pre>
 <ul>
 <li><b>Query:</b> embed the task. (1) Find the 20 most similar past tasks by embedding, then read their <code>USED</code> edges from HydraDB: they vote for tools. (2) Take the top 5 of that fused ranking and walk <code>CO</code> edges to the tools they're usually used with (about +1 point). (3) Walk <code>LED</code> edges from the task's 8 rarest words (about +3 points on multi-server tasks). Rank, pack to the token budget.</li>
-<li><b>Learning:</b> after each task, a <code>Task</code> node and its <code>USED</code> edges are added, and the word and co-use counts update.</li>
+<li><b>Learning:</b> after each task, a <code>Task</code> node and its <code>USED</code> edges are added, and the word and co-use counts update. This per-task write path is checked against the in-memory twin too.</li>
 <li><b>Store:</b> counts live on reified Link nodes because HydraDB batch writes set node properties but not edge properties. The vote hop is an id-only batched read. Every loadout served here is checked identical to an in-memory twin on the 200 held-out tasks; the 8,612-task curves use that twin.</li>
 <li><b>Weights</b> (not tuned per ordering): vote weight 1.0 and K=20 come from one check on shuffle 1; term weight 0.5 and co-use weight 0.2 are unchanged from v1.</li>
 <li><b>Data:</b> Toucan-1.5M: real MCP servers, real executed tool calls. 8,612 unique prompts (one per prompt_id; only 36 duplicate question texts, 1.8% have an earlier task at cosine ≥ 0.95), 2,236 tools across 367 servers, pooled into one catalog.</li>
@@ -85,6 +85,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <h2>What we measured and threw away</h2>
 <ul>
 <li><b>Shared entity memory</b> ("reuse IDs other agents resolved") was our first headline. It failed its own kill test: binding precision 21%, and even a perfect binder saves only 6.3% of lookups beyond a plain (tool, args) cache.</li>
+<li><b>Synthetic questions, real execution:</b> Toucan's questions were LLM-generated from each server's tools, so similar tasks recur by construction. That favours any past-task memory, ours and the baseline's; organic traffic may recur less. Deja is also level with tool search for its first ~400 tasks and pays off after that.</li>
 <li><b>Data-flow edges</b> (a value from one tool's output reappearing in another's arguments) are real but rare: removing them changes the result by 0.1 points, so they aren't part of the claim.</li>
 <li>Our first shipped model (word and co-use edges only, 52%) lost to the plain past-task memory baseline (65%) once a reviewer added that baseline. We rebuilt around it; the v1 row stays on the chart.</li>
 <li>Tool chains in real traces are shallow: only 2.8% have 3+ calls linked by data flow, so one-hop traversals are enough.</li>

@@ -1,7 +1,7 @@
 """Deja's learned graph in HydraDB.
 
   (:Term {key, df}) -[:LED]-> (:Link {n}) -[:TO]-> (:Tool {key, uses})      task word -> tool that solved it
-  (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)                          tools used together / data flowed between
+  (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)                          tools used together in one task
   (:Meta {n_tasks})
 
 Counts sit on reified Link nodes because HydraDB's batch writes can set node properties but not edge properties.
@@ -52,8 +52,8 @@ class HydraLearned(Learned):
         db.edges("TO", [(hid("link", w + "\x1f" + g), hid("tool", g)) for w, g in lk] + [(hid("co", a + "\x1f" + b), hid("tool", b)) for a, b in co])
         db.edges("CO", [(hid("tool", a), hid("co", a + "\x1f" + b)) for a, b in co])
     def ingest(s, task):
-        """Incremental write (load test). Task memory is append-only and exact; for counts it rewrites the touched
-        terms' current top-K links — a link that later drops out of a top-K stays in the graph (bulk_load is exact)."""
+        """Incremental write after each task. Task memory is append-only; counts rewrite the touched terms' current top-K
+        links. A link that later drops out of a top K stays in the graph, and term_scores cuts it at read time."""
         super().ingest(task)
         lk = [(w, g) for w in terms(task["q"]) for g, _ in s.links(w)]
         co = {(a, b) for a in task["gold"] for b in task["gold"] if a != b} | {tuple(f) for f in task["flows"]}
@@ -83,6 +83,12 @@ class HydraLearned(Learned):
         if not top: return {}
         where, p = s.db.any_of("t", top)
         rows = s.db.q(f"MATCH (t:Term)-[:LED]->(l:Link)-[:TO]->(x:Tool) WHERE {where} RETURN t.key AS term, t.df AS df, x.key AS tool, l.n AS n", **p)
+        # Same cut as the twin: per term keep the top K by (-n, tool) with n >= MIN_N. Incremental ingest can leave a link
+        # that fell out of a term's top K in the graph; its stored count never exceeds its true count and every current
+        # top-K link is rewritten whenever the term is touched, so this cut reproduces the twin exactly.
+        byterm = collections.defaultdict(list)
+        for r in rows: byterm[r["term"]].append(r)
+        rows = [r for rs in byterm.values() for r in sorted(rs, key=lambda r: (-r["n"], r["tool"]))[:s.K] if r["n"] >= s.MIN_N]
         N = (s.db.q("MATCH (m:Meta {id: $id}) RETURN m.n_tasks AS n", id=META) or [{"n": 0}])[0]["n"]
         out, idf = collections.Counter(), {}
         s.last_term_rows = rows                      # kept for the UI's "why" view
@@ -110,9 +116,11 @@ if __name__ == "__main__":
     cat, tasks = retr.build(); names = list(cat); nix = {n: k for k, n in enumerate(names)}
     TE, Q = retr.embed(None, "data/tool_emb.npy"), retr.embed(None, "data/q_emb.npy")
     Learned.Q = Q; HydraLearned.tool_names = {hid("tool", n): n for n in cat}
-    H = HydraLearned(); H.bulk_load(tasks[:300]); T = twin(H); bad = 0
-    for t in tasks[300:400]:
+    H = HydraLearned(); H.bulk_load(tasks[:300])
+    for t in tasks[300:400]: H.ingest(t)                 # the per-task learning path, one write batch per task
+    T = twin(H); bad = 0
+    for t in tasks[400:500]:
         sim = TE @ Q[t["i"]]; V = [names[k] for k in np.argsort(-sim, kind="stable")[:400]]
         a = retr.deja_rank(H, t["q"], Q[t["i"]], sim, V, nix)[0]; b = retr.deja_rank(T, t["q"], Q[t["i"]], sim, V, nix)[0]
         bad += retr.pack(a, cat, 2000) != retr.pack(b, cat, 2000)
-    print("graph vs twin loadout mismatches:", bad); assert bad == 0
+    print("bulk_load 300 + ingest 100 one at a time; graph vs twin loadout mismatches on the next 100:", bad); assert bad == 0
