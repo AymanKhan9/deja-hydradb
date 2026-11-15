@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Deploy to a fresh Ubuntu VM (tested target: Oracle Cloud Ampere A1, arm64, >= 4 GB RAM):  ./deploy.sh ubuntu@<vm-ip>
+# Deploy to a fresh Ubuntu VM (x86_64 or arm64, >= 4 GB RAM; live demo runs on an Oracle x86_64 VM):  ./deploy.sh ubuntu@<vm-ip>
 # Also open TCP 80 in the VCN security list (Oracle console) — this script handles the VM's own iptables.
 set -euo pipefail
 HOST="$1"; cd "$(dirname "$0")"
 rsync -az --delete --exclude .venv --exclude .hydradb --exclude __pycache__ --exclude data/raw --exclude '.git' \
-  --include 'data/' --include 'data/traces_slim.json' --include 'data/*.npy' --include 'data/results_2000_k10_n2.json' --include 'data/load.json' \
+  --include 'data/' --include 'data/traces_slim.json' --include 'data/*.npy' --include 'data/results_v2_*.json' --include 'data/load.json' \
   --exclude 'data/*' ./ "$HOST":deja/
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
@@ -12,7 +12,7 @@ command -v docker >/dev/null || { curl -fsSL https://get.docker.com | sudo sh; s
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 cd ~/deja && uv sync -q
-sudo -E env "PATH=$PATH" BUCKET=deja ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
+sudo -E env "PATH=$PATH" BUCKET=deja-v2 ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
 sudo tee /etc/systemd/system/deja.service >/dev/null <<UNIT
 [Unit]
 Description=Deja server
