@@ -22,7 +22,7 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 | Deja without word edges (ablation) | 65.7–66.3% | 37.2–37.6% |
 | Deja without co-use edges (ablation) | 65.8–66.4% | 39.5–40.8% |
 
-**Held out, live from HydraDB:** on 200 tasks the served graph never learned from: Deja 75.5%, past-task memory alone 72.5%, tool search 39.0%. Graph reads per loadout p50 146 ms / p95 303 ms. Every served loadout is identical to the in-memory twin (`matches_oracle: True`).
+**Held out, live from HydraDB:** on 200 tasks the served graph never learned from: Deja 75.5%, past-task memory alone 72.5%, tool search 39.0%. Graph reads per loadout p50 96 ms / p95 194 ms. Every served loadout is identical to the in-memory twin (`matches_oracle: True`).
 
 **Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
 graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
