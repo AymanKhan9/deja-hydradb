@@ -4,7 +4,7 @@ Agents now sit in front of hundreds or thousands of MCP tools. Preloading them a
 vector search over tool descriptions misses the tools a task *actually* ends up calling — especially the second
 server a task needs. **Deja keeps a graph in HydraDB of what real tasks needed, and gets sharper with every task it serves.**
 
-**Live demo: http://140.245.206.42/** · 
+**Live demo: http://140.245.206.42/**
 
 **Result** (Toucan-1.5M real MCP traces · 8,612 unique tasks · 2,236 tools across 367 servers · 2,000-token budget):
 
