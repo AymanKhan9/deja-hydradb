@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deja — learned tool loadouts on HydraDB</title>
+<style>
+:root{--bg:#0d0f12;--panel:#15181d;--line:#262b33;--text:#e7e9ee;--mute:#8b93a1;--deja:#f2a33a;--vec:#9aa4b2;--pop:#5b8def;--srv:#7c6cd6;--ok:#4cc38a;--bad:#e5484d}
+@media (prefers-color-scheme: light){:root{--bg:#fafaf8;--panel:#fff;--line:#e4e4e0;--text:#16181c;--mute:#646a73;--vec:#8a929e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1060px;margin:0 auto;padding:40px 16px 80px}
+.kicker{font:600 12px/1 ui-monospace,monospace;letter-spacing:.12em;color:var(--mute);text-transform:uppercase}
+h1{font-size:clamp(30px,5vw,48px);line-height:1.08;margin:12px 0 8px;letter-spacing:-.02em}h1 em{font-style:normal;color:var(--deja)}
+h2{font-size:20px;margin:56px 0 6px;letter-spacing:-.01em}.sub{color:var(--mute);max-width:720px;margin:0}
+.big{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:28px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+.num{font-size:40px;font-weight:700;letter-spacing:-.02em}.num small{font-size:16px;color:var(--mute);font-weight:500}
+.lbl{color:var(--mute);font-size:13px}
+svg text{fill:var(--mute);font:12px ui-sans-serif,system-ui}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--mute);margin:8px 0}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.bars .row{display:grid;grid-template-columns:150px 1fr 56px;gap:10px;align-items:center;margin:6px 0;font-size:13px}
+.bars .track{height:10px;background:var(--line);border-radius:5px;overflow:hidden}.bars .fill{height:100%}
+.live{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}@media (max-width:760px){.live{grid-template-columns:1fr}.bars .row{grid-template-columns:100px 1fr 48px}}
+.tool{display:flex;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:6px;font:12.5px ui-monospace,monospace;border:1px solid transparent;word-break:break-all}
+.tool.gold{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.why{color:var(--mute);font:11.5px ui-sans-serif,system-ui;margin:-2px 8px 6px}
+.status{font-weight:700}.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
+input,select,button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+button{background:var(--deja);color:#111;border:0;font-weight:600;cursor:pointer}
+.ask{display:flex;gap:8px;flex-wrap:wrap}.ask input{flex:1 1 320px}.ask select{flex:1 1 100%;max-width:100%}
+code,pre{font:12.5px/1.5 ui-monospace,monospace}pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
+</style>
+</head>
+<body>
+<main>
+<div class="kicker">Deja · agent context layer · built on HydraDB</div>
+<h1>Your agent has 2,000 tools.<br><em>Load the ones it will actually call.</em></h1>
+<p class="sub">Deja learns, in a HydraDB graph, which tools real tasks ended up needing — task words → tools, and tools that are used together or pass data to each other. Every task it serves makes the next loadout sharper.</p>
+
+<div class="big" id="big"></div>
+
+<h2>Gets sharper the more it is used</h2>
+<p class="sub">Share of tasks where <b>every</b> tool the agent ended up calling was already in its first loadout (2,000-token budget). Prequential: each task is scored <i>before</i> Deja learns from it. Band = 3 shuffles of the stream.</p>
+<div class="legend" id="legend"></div>
+<svg id="curve" viewBox="0 0 1000 340" width="100%" role="img" aria-label="learning curve"></svg>
+
+<h2>Where the lift comes from</h2>
+<p class="sub">Same budget, same tasks. “Popularity” is a learned non-graph baseline (vector + how often a tool was used). Ablations remove one kind of graph edge.</p>
+<div class="live">
+ <div class="card bars"><div class="lbl" style="margin-bottom:8px">All 8,612 tasks</div><div id="bars-all"></div></div>
+ <div class="card bars"><div class="lbl" style="margin-bottom:8px">Tasks whose tools span 2+ MCP servers</div><div id="bars-multi"></div></div>
+</div>
+
+<h2>Try it</h2>
+<p class="sub">Pick one of 200 tasks Deja never learned from (green = a tool the agent really called), or type your own. Left: Deja's loadout from HydraDB. Right: plain vector search, same budget.</p>
+<div class="card" style="margin-top:12px">
+ <div class="ask"><select id="preset"><option value="">— held-out tasks —</option></select>
+  <input id="q" placeholder="or describe a task, e.g. find the cheapest flight to Lisbon and convert the price to INR"><button id="go">Get loadout</button></div>
+ <p class="note" id="livenote"></p>
+ <div class="live" id="out"></div>
+</div>
+
+<h2>How it works</h2>
+<pre>(:Term {df}) -[:LED]-> (:Link {n}) -[:TO]-> (:Tool {uses})       a word in past tasks → the tool that solved them
+(:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)                  used together, or a value flowed from one to the other</pre>
+<ul>
+<li><b>Query:</b> vector-seed the catalog, then two HydraDB traversals — task terms → Link → Tool (weighted by learned counts and idf), and top seeds → CoLink → Tool (pulls in the <i>second</i> server a task needs). Rank, pack to the token budget.</li>
+<li><b>Learning:</b> after each task, the tools it actually called update the counts. Data flow is observed, not labelled: a value from one tool's output reappearing in another tool's arguments.</li>
+<li><b>Store:</b> counts live on reified Link nodes because HydraDB batches can set node properties but not edge properties. The served graph keeps term links seen ≥2 times, top 10 per term (31k links), which cuts a loadout query from ~5.8k to ~200 rows.</li>
+<li><b>Verified:</b> the 200 held-out loadouts read through HydraDB are identical to an in-memory twin of the same model; the 8,612-task learning curves are computed with that twin (a per-task HydraDB replay takes over an hour on this laptop).</li>
+<li><b>Data:</b> Toucan-1.5M — real MCP servers, real executed tool calls. 8,612 unique prompts, 2,236 tools across 367 servers, pooled into one catalog.</li>
+</ul>
+
+<h2>Under load</h2>
+<p class="sub" id="loadtxt"></p>
+
+<h2>What we measured and threw away</h2>
+<ul>
+<li><b>Shared entity memory</b> (“reuse IDs other agents resolved”) was our first headline. It failed its own kill test: binding precision 21%, and even a perfect binder adds only 6.3% of lookups beyond a plain (tool, args) cache.</li>
+<li>Tool chains in real traces are shallow: only 2.8% have 3+ calls linked by data flow. So we use one- and two-hop traversals and don't pretend to need deep path search.</li>
+<li>40% of repeated identical tool calls return a different result — caching tool outputs blindly is unsafe.</li>
+<li>HydraDB's local-filesystem store can't publish index generations or hand over a write lease (no conditional PUT) — reads crawled until we moved it onto S3 (RustFS) with the indexer running.</li>
+</ul>
+<p class="note" id="foot"></p>
+</main>
+<script>
+const C={deja:"var(--deja)",vector:"var(--vec)",popularity:"var(--pop)",servers:"var(--srv)","deja-terms":"var(--deja)","deja-couse":"var(--deja)"};
+const NAME={deja:"Deja",vector:"Vector top-k",popularity:"Vector + popularity",servers:"Load whole servers","deja-terms":"Deja, term edges only","deja-couse":"Deja, co-use edges only"};
+const pct=x=>(100*x).toFixed(1)+"%";
+fetch("results.json").then(r=>r.json()).then(R=>{
+ const os=["1","2","3"].map(k=>R.orders[k]);const avg=(m,f)=>os.reduce((a,o)=>a+f(o)[m],0)/os.length;
+ const H=R.hydra||{};
+ document.getElementById("big").innerHTML=[
+  [pct(avg("deja",o=>o.overall)),"vs "+pct(avg("vector",o=>o.overall))+" vector","tasks with every needed tool in the first loadout"],
+  [pct(avg("deja",o=>o.multi)),"vs "+pct(avg("vector",o=>o.multi)),"same, when the task spans 2+ MCP servers"],
+  [(H.latency_ms?H.latency_ms.p50.toFixed(1)+" ms":"—"),(H.latency_ms?"p95 "+H.latency_ms.p95.toFixed(1)+" ms":""),"HydraDB graph read per loadout"]
+ ].map(([a,b,c])=>`<div class="card"><div class="num">${a} <small>${b}</small></div><div class="lbl">${c}</div></div>`).join("");
+ // curve
+ const ms=["deja","popularity","servers","vector"],W=1000,Hh=340,P={l:48,r:16,t:16,b:36},n=os[0].curve.deja.length;
+ const all=ms.flatMap(m=>os.flatMap(o=>o.curve[m]));const lo=Math.floor(Math.min(...all)*20)/20,hi=Math.ceil(Math.max(...all)*20)/20;
+ const x=i=>P.l+i*(W-P.l-P.r)/(n-1),y=v=>P.t+(hi-v)*(Hh-P.t-P.b)/(hi-lo);let s="";
+ for(let g=lo;g<=hi+1e-9;g+=.05)s+=`<line x1="${P.l}" x2="${W-P.r}" y1="${y(g)}" y2="${y(g)}" stroke="var(--line)"/><text x="${P.l-8}" y="${y(g)+4}" text-anchor="end">${Math.round(g*100)}%</text>`;
+ for(let i=0;i<n;i++)s+=`<text x="${x(i)}" y="${Hh-12}" text-anchor="middle">${Math.round((i+1)*R.n_tasks/n/100)/10}k</text>`;
+ for(const m of ms){const mn=[...Array(n)].map((_,i)=>Math.min(...os.map(o=>o.curve[m][i]))),mx=[...Array(n)].map((_,i)=>Math.max(...os.map(o=>o.curve[m][i]))),me=[...Array(n)].map((_,i)=>os.reduce((a,o)=>a+o.curve[m][i],0)/os.length);
+  s+=`<path d="M${mx.map((v,i)=>x(i)+","+y(v)).join("L")}L${mn.map((v,i)=>x(i)+","+y(v)).reverse().join("L")}Z" fill="${C[m]}" opacity=".15"/>`;
+  s+=`<path d="M${me.map((v,i)=>x(i)+","+y(v)).join("L")}" fill="none" stroke="${C[m]}" stroke-width="${m=="deja"?3:2}"/>`;}
+ s+=`<text x="${W-P.r}" y="${Hh-0}" text-anchor="end">tasks served →</text>`;
+ document.getElementById("curve").innerHTML=s;
+ document.getElementById("legend").innerHTML=ms.map(m=>`<span><i style="background:${C[m]}"></i>${NAME[m]}</span>`).join("");
+ const bars=(id,f)=>{const order=["deja","deja-terms","deja-couse","popularity","servers","vector"];const mx=Math.max(...order.map(m=>avg(m,f)));
+  document.getElementById(id).innerHTML=order.map(m=>`<div class="row"><span>${NAME[m]}</span><div class="track"><div class="fill" style="width:${100*avg(m,f)/mx}%;background:${C[m]};opacity:${m.startsWith("deja-")?.55:1}"></div></div><b>${pct(avg(m,f))}</b></div>`).join("")};
+ bars("bars-all",o=>o.overall);bars("bars-multi",o=>o.multi);
+ const Ld=R.load; if(Ld)document.getElementById("loadtxt").innerHTML=`${Ld.readers} concurrent planners reading loadouts from one single-node HydraDB while a learner keeps writing new tasks: <b>${Ld.errors} errors</b>, ${Ld.qps.toFixed(1)} loadouts/s, p50 ${(Ld.p50/1000).toFixed(1)} s, p95 ${(Ld.p95/1000).toFixed(1)} s; ${Ld.writes} tasks learned meanwhile. Correct under contention, but one laptop node is the ceiling — HydraDB scales reads by adding query nodes over the same object store, which is the next step.`;
+ if(H.n)document.getElementById("big").insertAdjacentHTML("beforeend",`<div class="card"><div class="num">${pct(H.deja)} <small>vs ${pct(H.vector)}</small></div><div class="lbl">on ${H.n} tasks never learned from, read live from HydraDB</div></div>`);
+ document.getElementById("foot").textContent=`${R.n_tasks.toLocaleString()} tasks · ${R.n_tools.toLocaleString()} tools · ${R.budget.toLocaleString()}-token budget · HydraDB ${H.matches_oracle?"run matched the in-memory oracle exactly":""}`;
+});
+// live
+const out=document.getElementById("out"),note=document.getElementById("livenote");
+fetch("api/presets").then(r=>r.json()).then(P=>{const s=document.getElementById("preset");P.forEach(p=>{const o=document.createElement("option");o.value=p.id;o.textContent=(p.multi?"[multi-server] ":"")+p.q.slice(0,140);s.appendChild(o)})})
+ .catch(()=>{note.textContent="Live backend is offline right now — the numbers above are the recorded results."});
+function col(title,list,gold){const g=new Set(gold||[]);const hit=gold?gold.every(t=>list.some(x=>x.name==t)):null;
+ return `<div class="card"><div style="display:flex;justify-content:space-between"><b>${title}</b>${hit===null?"":`<span class="status ${hit?"ok":"bad"}">${hit?"all needed tools loaded":"missing a needed tool"}</span>`}</div>
+ <div class="lbl" style="margin:4px 0 8px">${list.length} tools · ${list.reduce((a,x)=>a+x.tokens,0)} tokens</div>`+
+ list.map(t=>`<div class="tool ${g.has(t.name)?"gold":""}"><span>${t.name}</span><span class="lbl">${t.server.slice(0,22)}</span></div>`+
+  ((t.why_terms&&t.why_terms.length)||t.why_co?`<div class="why">${t.why_terms&&t.why_terms.length?"learned from: "+t.why_terms.map(([w,n])=>`“${w}”×${n}`).join(", "):""}${t.why_co?` · used with ${t.why_co[0]} ×${t.why_co[1]}`:""}</div>`:"")).join("")+`</div>`}
+function show(r){if(r.error){note.textContent="Error: "+r.error;return}
+ note.textContent=`“${r.q.slice(0,200)}” — graph traversal ${r.graph_ms} ms over a ${r.catalog}-tool catalog`;
+ out.innerHTML=col("Deja (HydraDB)",r.deja,r.gold)+col("Vector top-k",r.vector,r.gold)}
+document.getElementById("preset").onchange=e=>{if(e.target.value)fetch("api/loadout?id="+e.target.value).then(r=>r.json()).then(show)};
+document.getElementById("go").onclick=()=>{const q=document.getElementById("q").value.trim();if(q)fetch("api/loadout?q="+encodeURIComponent(q)).then(r=>r.json()).then(show)};
+</script>
+</body>
+</html>

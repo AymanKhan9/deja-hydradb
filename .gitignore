@@ -1,0 +1,4 @@
+data/
+.venv/
+.hydradb/
+__pycache__/
