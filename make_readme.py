@@ -28,7 +28,9 @@ load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote,
 
 readme = f"""# Deja: learned tool loadouts for agents, on HydraDB
 
-**Live demo: http://140.245.206.42/** · Loom: _(link)_ · MIT licensed
+**Live demo: https://deja-hydradb.vercel.app** · [Article on X](https://x.com/AymanKhan90/status/2122198078967226712) · MIT licensed
+
+![Deja](docs/img/1_cover.png)
 
 Agents now sit in front of hundreds or thousands of MCP tools. Preloading them all burns the context window, and plain
 tool search over descriptions misses the tools a task *actually* ends up calling, especially the second server a task
@@ -61,7 +63,11 @@ unchanged from v1. The stream numbers use an in-memory twin of exactly the serve
 HydraDB reads on the held-out set and in `python hydra_store.py`, which also checks the per-task learning path: bulk-load
 300 tasks, ingest 100 one at a time, and require identical loadouts on the next 100.
 
+![results](docs/img/2_results.png)
+
 **Learning curve** (shuffle 1, log-spaced buckets so the cold start is visible):
+
+![learning curve](docs/img/3_learning_curve.png)
 
 {curve}
 
@@ -70,6 +76,8 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 {budget}
 
 ## How it works
+
+![how it works](docs/img/4_how_it_works.png)
 
 ```
 (:Task) -[:USED]-> (:Tool)                                   every past task and the tools it called

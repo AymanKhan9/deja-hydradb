@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Deploy to a fresh Ubuntu VM (x86_64 or arm64, >= 4 GB RAM; live demo runs on an Oracle x86_64 VM):  ./deploy.sh ubuntu@<vm-ip>
+# The public link https://deja-hydradb.vercel.app is a rewrite proxy to the VM (vercel/vercel.json): if the VM IP
+# changes, edit that file and run `npx vercel deploy --prod` in vercel/.
 # Also open TCP 80 in the VCN security list (Oracle console) — this script handles the VM's own iptables.
 set -euo pipefail
 HOST="$1"; cd "$(dirname "$0")"
