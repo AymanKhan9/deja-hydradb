@@ -105,6 +105,23 @@ class HydraLearned(Learned):
         for r in rows: out[r["b"]] = max(out[r["b"]], r["n"] / r["uses"] / (1 + rank[r["a"]]))
         return out
 
+CATALOG = hid("catalog", "deja")
+
+def write_catalog(db, tool_names):
+    """The live catalog is graph state: (:Catalog)-[:LISTS]->(:Tool). Labels first, then edges."""
+    db.nodes("Catalog", [{"id": CATALOG, "key": "catalog"}], ["key"])
+    db.nodes("Tool", [{"id": hid("tool", n), "key": n} for n in tool_names], ["key"])
+    db.edges("LISTS", [(CATALOG, hid("tool", n)) for n in tool_names])
+
+def remove_tool(db, name):
+    """tools/list changed: the tool leaves the catalog. Its USED/CO/LED history stays; reads just stop returning it."""
+    db.q("MATCH (c {id: $c})-[r:LISTS]->(t {id: $t}) DELETE r", c=CATALOG, t=hid("tool", name))
+
+def read_catalog(db):
+    """Current catalog, one id-only batched read."""
+    rows = db.q("UNWIND $rows AS row MATCH (a {id: row.id})-[:LISTS]->(b) RETURN row.id AS src, b.id AS dst", rows=[{"id": CATALOG}])
+    return {HydraLearned.tool_names[r["dst"]] for r in rows}
+
 def twin(h):
     """The same learned state, read from memory instead of HydraDB (shares the mirror; nothing is copied)."""
     import copy

@@ -9,7 +9,7 @@ STOP = set("a an the and or of to in on for with by from at is are be this that 
            "about into using use get find give make show tell any some all each other more most just like so if not no".split())
 def terms(q): return {w for w in norm(q).split() if w not in STOP and len(w) > 2}
 
-def build(path="data/raw/kimi_*.parquet", cache="data/traces_slim.json"):
+def build(path="data/raw/kimi_*.parquet", cache="data/traces_slim_ok.json"):   # slim traces + per-call ok flag
     if os.path.exists(cache): T = json.load(open(cache))
     else: T = load(path, slim=True); json.dump(T, open(cache, "w"))
     seen = set(); D = []
@@ -25,7 +25,8 @@ def build(path="data/raw/kimi_*.parquet", cache="data/traces_slim.json"):
     tasks = []
     for t in D:
         gold = {c["tool"] for c in t["calls"] if c["tool"] in cat}
-        if gold: tasks.append({"i": len(tasks), "q": t["question"], "gold": gold, "servers": t["servers"], "gold_servers": {cat[g]["server"] for g in gold},
+        ok = {c["tool"] for c in t["calls"] if c["tool"] in cat and c.get("ok", True)}      # tools with >=1 successful call
+        if gold: tasks.append({"i": len(tasks), "q": t["question"], "gold": gold, "gold_ok": ok, "failed": gold - ok, "servers": t["servers"], "gold_servers": {cat[g]["server"] for g in gold},
                                "flows": [(t["calls"][i]["tool"], t["calls"][j]["tool"]) for i, j, _, _ in t["flows"]]})
     return cat, tasks
 
@@ -105,13 +106,16 @@ LAM, BETA, GAMMA, SEEDS = 1.0, 0.5, 0.2, 5
 def rank(cand, score):
     return sorted(cand, key=lambda n: (-round(float(score(n)), 9), n))   # deterministic ties
 
-def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True):
-    """Fused ranking. Returns (ranked tools, parts) so the UI can explain each pick."""
-    kn = L.knn_scores(qvec) if use_knn else {}
+def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True, active=None):
+    """Fused ranking. Returns (ranked tools, parts) so the UI can explain each pick.
+    active: the current catalog (set of tool names) — tools outside it are never scored, whatever memory says;
+    the caller passes V already restricted to it."""
+    keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
+    kn = keep(L.knn_scores(qvec)) if use_knn else {}
     fused = lambda n: sim[nix[n]] + LAM * kn.get(n, 0)
     seeds = rank(set(V[:200]) | set(kn), fused)[:SEEDS]           # co-use hop starts from the memory-informed top 5
-    ts = L.term_scores(q) if use_terms else {}
-    cs = L.co_scores(seeds) if use_co else {}
+    ts = keep(L.term_scores(q)) if use_terms else {}
+    cs = keep(L.co_scores(seeds)) if use_co else {}
     final = lambda n: fused(n) + BETA * ts.get(n, 0) + GAMMA * cs.get(n, 0)
     return rank(set(V[:200]) | set(kn) | set(ts) | set(cs), final), {"knn": kn, "terms": ts, "co": cs}
 

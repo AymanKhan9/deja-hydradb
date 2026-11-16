@@ -6,6 +6,13 @@ def norm(s):
     s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower()
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s)).strip()
 
+# A tool call failed if its response opens with an error. Looks only at the first 300 chars: a successful result can
+# mention "error" deep inside its payload. Precision was hand-checked on a sample (see README).
+ERR = re.compile(r"(^\s*\{?\s*\"?error\"?\s*[:=]|^\W*error\b|exception|traceback|failed to|not found|invalid (argument|param|input)|"
+                 r"unauthori[sz]ed|forbidden|rate limit|timed? ?out|\b(4\d\d|5\d\d)\b.*(error|status)|is not a function|unknown tool|"
+                 r"no such tool|missing required|^.{0,40}\berror\b|\"status\"\s*:\s*\"(not_found|error|failed)\")", re.I)
+def call_ok(out): return bool(out and out.strip()) and not ERR.search(out[:300])
+
 def idlike(v):
     # ponytail: heuristic ID filter; plain words/phrases are search terms, not resolved entities
     v = v.strip()
@@ -86,6 +93,6 @@ def load(pattern="data/raw/kimi_*.parquet", slim=False):
                 if slim:
                     p["tools"] = [{"name": t["function"]["name"], "desc": t["function"].get("description", ""), "tokens": len(json.dumps(t)) // 4}
                                   for t in p["tools"] if "function" in t]
-                    p["calls"] = [{"tool": c["tool"]} for c in p["calls"]]
+                    p["calls"] = [{"tool": c["tool"], "ok": call_ok(c["out"])} for c in p["calls"]]
                 out.append(p)
     return out
