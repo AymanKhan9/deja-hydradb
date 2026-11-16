@@ -53,13 +53,17 @@ def loadout(q, qvec, budget=BUDGET):
     with LOCK: return _loadout(q, qvec, budget)
 
 def _loadout(q, qvec, budget, store=None):
-    st = store or L; t = time.perf_counter(); active, aix = catalog()
+    st = store or L; t = time.perf_counter(); active, aix = catalog(); aix_all = aix   # tool search has no outcome memory
+    held = st.quarantined()                                  # graph (Quarantine-HOLDS->Tool) or, for the twin, the record
+    if held: active = active - held; aix = np.array([k for k in aix if names[k] in active])
     sim = TE @ qvec; V = [names[aix[k]] for k in np.argsort(-sim[aix], kind="stable")[:400]]
     nb = st.neighbours(qvec); s_mem = nb[0][1] if nb else 0.0; s_tool = float(sim[aix].max()); conf = confidence(s_mem, s_tool)
     mode = "abstain" if conf < THR else "fallback" if s_mem < TAU else "deja"
-    ranked, parts = retr.deja_rank(st, q, qvec, sim, V, ix, active=active) if mode == "deja" else (V, {"knn": {}, "terms": {}, "co": {}})
+    if mode == "deja": ranked, parts = retr.deja_rank(st, q, qvec, sim, V, ix, active=active)
+    else: bb = retr.base_scores(q, sim); ranked, parts = retr.rank(set(V[:200]), lambda n: bb[ix[n]]), {"knn": {}, "terms": {}, "co": {}}
     graph_ms = (time.perf_counter() - t) * 1000
-    picked = [] if mode == "abstain" else retr.pack(ranked, cat, budget)
+    picked = [] if mode == "abstain" else retr.pack(ranked, cat, budget); bbase = retr.base_scores(q, sim)   # comparison column: hybrid tool search
+    Vall = [names[aix_all[k]] for k in np.argsort(-sim[aix_all], kind="stable")[:400]]                   # over the full live catalog
     if store is not None: return mode, picked
     nbd = dict(nb); why_k = {}
     if mode == "deja":
@@ -77,8 +81,9 @@ def _loadout(q, qvec, budget, store=None):
             "deja": [tool(n, sim=round(float(sim[ix[n]]), 3), knn=round(parts["knn"].get(n, 0), 3), term=round(parts["terms"].get(n, 0), 3),
                           co=round(parts["co"].get(n, 0), 3), why_knn=sorted(why_k.get(n, []), key=lambda x: -x[1])[:2],
                           why_terms=sorted(why_t.get(n, []), key=lambda x: -x[1])[:4], why_co=why_c.get(n)) for n in picked],
-            "vector": [tool(n, sim=round(float(sim[ix[n]]), 3)) for n in retr.pack(V, cat, budget)],
-            "graph_ms": round(graph_ms, 1), "budget": budget, "catalog": len(active), "memory": len(L.past)}
+            "vector": [tool(n, sim=round(float(sim[ix[n]]), 3)) for n in retr.pack(retr.rank(set(Vall[:200]), lambda n: bbase[ix[n]]), cat, budget)],
+            "graph_ms": round(graph_ms, 1), "budget": budget, "catalog": len(active), "memory": len(L.past), "quarantined": sorted(held)[:20],
+            "n_quarantined": len(held)}
 
 class H(http.server.SimpleHTTPRequestHandler):
     def __init__(s, *a, **k): super().__init__(*a, directory="web", **k)
@@ -128,8 +133,8 @@ if __name__ == "__main__":
     R = json.load(open(f"data/results_v2_{BUDGET}.json"))
     R["budgets"] = {b: json.load(open(f"data/results_v2_{b}.json"))["orders"]["1"]["overall"] for b in (1000, 2000, 4000)
                     if os.path.exists(f"data/results_v2_{b}.json")}
-    for k in ("outcome", "lifecycle", "load"):
-        if os.path.exists(f"data/{k}.json"): R[k] = json.load(open(f"data/{k}.json"))
+    for k in ("outcome", "lifecycle", "load", "analysis_v4"):
+        if os.path.exists(f"data/{k}.json"): R[k.split("_")[0]] = json.load(open(f"data/{k}.json"))
     R.get("lifecycle", {}).pop("scenario_cases", None)
     R["abstain"] = {k: v for k, v in AB.items() if k != "setup"} | {"setup": AB["setup"], "served_threshold": THR, "fallback_tau": TAU}
     R["hydra"] = holdout_check()

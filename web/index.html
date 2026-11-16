@@ -54,6 +54,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
  <div class="card bars"><div class="lbl" style="margin-bottom:8px">All 8,612 tasks</div><div id="bars-all"></div></div>
  <div class="card bars"><div class="lbl" style="margin-bottom:8px">Tasks that called tools on 2+ MCP servers (31%)</div><div id="bars-multi"></div></div>
 </div>
+<p class="note" id="ci" style="margin-top:10px"></p>
 <div class="card" style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">Same comparison at other token budgets (shuffle 1)</div><table id="budgets"></table></div>
 
 <h2>Learns only from calls that worked</h2>
@@ -61,7 +62,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <div class="card" style="margin-top:12px"><table id="outcome"></table></div>
 
 <h2>Knows when nothing fits</h2>
-<p class="sub">Toucan has no "no suitable tool" tasks, so we built them: hold out whole clusters of near-duplicate servers (3 seeds, ~37 servers each) and keep their tasks, but only where no remaining tool resembles any tool the task needed (a hand-checked substitute threshold). The abstain rule was fit on seed 1 and tested on seeds 2 and 3. Honest result: the signal is how close the nearest past task is. The graph signals we tried (vote agreement, server spread, co-use coherence) added nothing, so the rule uses similarity only.</p>
+<p class="sub">Toucan has no "no suitable tool" tasks, so we built them: hold out whole clusters of near-duplicate servers (3 seeds, ~37 servers each) and keep their tasks, but only where no remaining tool resembles any tool the task needed (a hand-checked substitute threshold). The abstain rule was fit on seed 1 and tested on seeds 2 and 3. Honest result: the signal is how close the nearest past task is. The graph signals we tried (vote agreement, server spread, co-use coherence) added nothing. What does help is remembering the tasks it couldn't serve: mostly when the same missing capability is asked for again, less for a brand-new gap. That needs a signal that a task went unserved, which the live demo doesn't have, so the page's abstain rule is the similarity one.</p>
 <div class="card" style="margin-top:12px"><table id="abst"></table><p class="note" id="fbtxt" style="margin:8px 0 0"></p></div>
 
 <h2>Tools come and go</h2>
@@ -90,7 +91,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <li><b>Abstain or fall back:</b> before ranking, a two-feature rule (closest past task, best tool match) decides: if nothing fits, load nothing and say why; if no past task is close, use plain tool search (this also covers the cold start); otherwise Deja.</li>
 <li><b>Learning:</b> after each task, a <code>Task</code> node with <code>USED</code> (worked) and <code>FAILED</code> (errored) edges is added, and the word and co-use counts update from the calls that worked. This per-task write path is checked against the in-memory twin too.</li>
 <li><b>Store:</b> counts live on reified Link nodes because HydraDB batch writes set node properties but not edge properties. The vote hop is an id-only batched read. Every loadout served here is checked identical to an in-memory twin on the 200 held-out tasks; the 8,612-task curves use that twin.</li>
-<li><b>Weights</b> (not tuned per ordering): vote weight 1.0 and K=20 come from one check on shuffle 1; term weight 0.5 and co-use weight 0.2 are unchanged from v1.</li>
+<li><b>Model choices</b> (made on shuffle 1 only, not tuned per ordering): the base relevance is cosine + 0.15 × BM25 (0.05–0.35 tried); each of the 20 nearest past tasks votes with weight similarity⁸; word weight 0.5 and co-use weight 0.2 are unchanged from v1. The memory-only baseline gets the same base and vote weighting.</li>
 <li><b>Data:</b> Toucan-1.5M: real MCP servers, real executed tool calls. 8,612 unique prompts (one per prompt_id; only 36 duplicate question texts, 1.8% have an earlier task at cosine ≥ 0.95), 2,236 tools across 367 servers, pooled into one catalog.</li>
 </ul>
 
@@ -111,21 +112,21 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <p class="note" id="foot"></p>
 </main>
 <script>
-const C={deja:"var(--deja)",knn:"var(--knn)",vector:"var(--vec)",popularity:"var(--pop)",servers:"var(--srv)","deja-v1":"var(--v1)","deja-no-terms":"var(--deja)","deja-no-couse":"var(--deja)"};
-const NAME={deja:"Deja",knn:"Past-task memory, no graph",vector:"Tool search (vector)",popularity:"Vector + popularity",servers:"Load whole servers","deja-v1":"Deja v1 (words + co-use)","deja-no-terms":"Deja without word edges","deja-no-couse":"Deja without co-use edges"};
+const C={search:"var(--srv)",bm25:"var(--vec)",hybrid:"var(--vec)",deja:"var(--deja)",knn:"var(--knn)",vector:"var(--vec)",popularity:"var(--pop)",servers:"var(--srv)","deja-v1":"var(--v1)","deja-no-terms":"var(--deja)","deja-no-couse":"var(--deja)"};
+const NAME={search:"Tool search (hybrid: Deja's base)",bm25:"Tool search (BM25)",hybrid:"Tool search (rank fusion)",deja:"Deja",knn:"Past-task memory, no graph",vector:"Tool search (vector)",popularity:"Vector + popularity",servers:"Load whole servers","deja-v1":"Deja v1 (words + co-use)","deja-no-terms":"Deja without word edges","deja-no-couse":"Deja without co-use edges"};
 const pct=x=>(100*x).toFixed(1)+"%";
 fetch("results.json").then(r=>r.json()).then(R=>{
  const os=["1","2","3"].map(k=>R.orders[k]);const avg=(m,f)=>os.reduce((a,o)=>a+f(o)[m],0)/os.length;
  const H=R.hydra||{};
  const OC=R.outcome||{},os2=Object.keys(OC),om=(m,k)=>os2.reduce((a,s)=>a+OC[s][m][k],0)/os2.length;
  document.getElementById("big").innerHTML=[
-  os2.length?[pct(om("deja-ok","succeeded")),"vs "+pct(om("vector","succeeded")),"tasks with every tool that worked already in the first loadout (vs tool search)"]:null,
-  os2.length?[pct(om("deja-ok","broken_tool_loaded")),"vs "+pct(om("deja","broken_tool_loaded")),"loadouts carrying a chronically broken tool (vs learning from every call)"]:null,
-  H.n?[pct(H.deja),"vs "+pct(H.vector),`on ${H.n} tasks never learned from, served live from HydraDB (tools that worked)`]:null,
+  os2.length?[pct(om("deja-ok+quar","succeeded")),"vs "+pct(om("search","succeeded")),"tasks with every tool that worked already in the first loadout (vs hybrid tool search)"]:null,
+  os2.length?[pct(om("deja-ok+quar","broken_tool_loaded")),"vs "+pct(om("deja","broken_tool_loaded")),"loadouts carrying a chronically broken tool (vs learning from every call)"]:null,
+  H.n?[pct(H.deja),"vs "+pct(H.vector),`on ${H.n} tasks never learned from, served live from HydraDB (tools that worked, vs hybrid tool search)`]:null,
   H.latency_ms?[H.latency_ms.p50.toFixed(0)+" ms","p95 "+H.latency_ms.p95.toFixed(0)+" ms","HydraDB graph reads per loadout"]:null
  ].filter(Boolean).map(([a,b,c])=>`<div class="card"><div class="num">${a} <small>${b}</small></div><div class="lbl">${c}</div></div>`).join("");
  // log-bucket curve
- const ms=["deja","knn","deja-v1","popularity","vector"],W=1000,Hh=340,P={l:48,r:16,t:16,b:40},e=os[0].curve_edges,n=e.length-1;
+ const ms=["deja","knn","deja-v1","search","vector"],W=1000,Hh=340,P={l:48,r:16,t:16,b:40},e=os[0].curve_edges,n=e.length-1;
  const all=ms.flatMap(m=>os.flatMap(o=>o.curve[m]));const lo=Math.floor(Math.min(...all)*10)/10,hi=Math.ceil(Math.max(...all)*10)/10;
  const x=i=>P.l+(i+.5)*(W-P.l-P.r)/n,y=v=>P.t+(hi-v)*(Hh-P.t-P.b)/(hi-lo);let s="";
  for(let g=lo;g<=hi+1e-9;g+=.1)s+=`<line x1="${P.l}" x2="${W-P.r}" y1="${y(g)}" y2="${y(g)}" stroke="var(--line)"/><text x="${P.l-8}" y="${y(g)+4}" text-anchor="end">${Math.round(g*100)}%</text>`;
@@ -137,18 +138,22 @@ fetch("results.json").then(r=>r.json()).then(R=>{
  s+=`<text x="${W-P.r}" y="${Hh-2}" text-anchor="end">tasks already served →</text>`;
  document.getElementById("curve").innerHTML=s;
  document.getElementById("legend").innerHTML=ms.map(m=>`<span><i style="background:${C[m]}"></i>${NAME[m]}</span>`).join("");
- const bars=(id,f)=>{const order=["deja","knn","deja-no-terms","deja-no-couse","deja-v1","popularity","servers","vector"];const mx=Math.max(...order.map(m=>avg(m,f)));
+ const bars=(id,f)=>{const order=["deja","knn","deja-no-terms","deja-no-couse","deja-v1","search","hybrid","popularity","servers","vector","bm25"];const mx=Math.max(...order.map(m=>avg(m,f)));
   document.getElementById(id).innerHTML=order.map(m=>`<div class="row"><span>${NAME[m]}</span><div class="track"><div class="fill" style="width:${100*avg(m,f)/mx}%;background:${C[m]};opacity:${m.startsWith("deja-no")?.55:1}"></div></div><b>${pct(avg(m,f))}</b></div>`).join("")};
  bars("bars-all",o=>o.overall);bars("bars-multi",o=>o.multi);
  const B=R.budgets||{};const bs=Object.keys(B).sort((a,b)=>a-b);
- if(bs.length)document.getElementById("budgets").innerHTML=`<tr><th>token budget</th>${bs.map(b=>`<th>${(+b).toLocaleString()}</th>`).join("")}</tr>`+["vector","knn","deja"].map(m=>`<tr><td>${NAME[m]}</td>${bs.map(b=>`<td>${pct(B[b][m])}</td>`).join("")}</tr>`).join("");
- if(os2.length){const rows=[["vector","Tool search"],["knn","Past-task memory, every call"],["deja","Deja, learning from every call"],["knn-ok","Past-task memory, successes only"],["deja-ok","<b>Deja, successes only (served)</b>"]];
+ if(bs.length)document.getElementById("budgets").innerHTML=`<tr><th>token budget</th>${bs.map(b=>`<th>${(+b).toLocaleString()}</th>`).join("")}</tr>`+["vector","search","knn","deja"].map(m=>`<tr><td>${NAME[m]}</td>${bs.map(b=>`<td>${pct(B[b][m])}</td>`).join("")}</tr>`).join("");
+ if(os2.length){const rows=[["vector","Tool search (vector)"],["search","Tool search (hybrid)"],["knn","Past-task memory, every call"],["deja","Deja, learning from every call"],["knn-ok","Past-task memory, successes only"],["deja-ok","Deja, successes only"],["deja-ok+quar","<b>Deja, successes only + quarantine (served)</b>"]].filter(([m])=>OC[os2[0]][m]);
   document.getElementById("outcome").innerHTML=`<tr><th></th><th>every tool that worked loaded</th><th>every called tool loaded</th><th>loadout has a chronically broken tool</th></tr>`+rows.map(([m,n])=>`<tr><td>${n}</td><td>${pct(om(m,"succeeded"))}</td><td>${pct(om(m,"called"))}</td><td>${pct(om(m,"broken_tool_loaded"))}</td></tr>`).join("")}
  const AB=R.abstain;if(AB){const T=AB.policies["similarity only"].tradeoff;
   document.getElementById("abst").innerHTML=`<tr><th>allowed wrong abstentions (fit on seed 1)</th><th>no-fit tasks caught, seed 2 / 3</th><th>answerable tasks wrongly abstained, seed 2 / 3</th></tr>`+Object.keys(T).map(fa=>`<tr><td>${Math.round(fa*100)}%${Math.abs(fa-0.05)<1e-9?" (served)":""}</td><td>${pct(T[fa]["2"].abstain_recall_unanswerable)} / ${pct(T[fa]["3"].abstain_recall_unanswerable)}</td><td>${pct(T[fa]["2"].false_abstain_answerable)} / ${pct(T[fa]["3"].false_abstain_answerable)}</td></tr>`).join("");
+  const U=AB.unserved;if(U){const g=(e,v,m,x)=>pct(e[v]["2"][m][x])+" / "+pct(e[v]["3"][m][x]);
+   document.getElementById("abst").innerHTML+=`<tr><th colspan="3" style="text-align:left;padding-top:14px">Remembering tasks it couldn't serve (abstain if the similarity rule <i>or</i> the memory rule says so)</th></tr><tr><th>allowed wrong abstentions</th><th>caught when the same gap repeats · when it's a new gap (seed 2 / 3)</th><th>wrongly abstained</th></tr>`+
+    Object.keys(U.budgets).map(fa=>{const e=U.budgets[fa].eval;return `<tr><td>${Math.round(fa*100)}%</td><td>${g(e,"repeats","combined","caught")} · ${g(e,"new_gaps","combined","caught")}</td><td>${g(e,"repeats","combined","wrong")}</td></tr>`}).join("")}
   const F=AB.fallback.eval;document.getElementById("fbtxt").innerHTML=`Cold-start fallback (plain tool search when the closest past task is below ${AB.fallback.tau.toFixed(2)}): overall ${pct(F["2"].deja)} → ${pct(F["2"]["deja+fallback"])} (seed 2) and ${pct(F["3"].deja)} → ${pct(F["3"]["deja+fallback"])} (seed 3); it helps in the first few hundred tasks and is neutral after.`}
  const LF=R.lifecycle;if(LF){const sc=LF.scenario,st=LF.stream,ks=Object.keys(st),m=(k,f)=>ks.reduce((a,s)=>a+st[s][k][f],0)/ks.length;
   document.getElementById("life").innerHTML=`<b>The removal test</b> (on HydraDB): learn a task that used tool A → remove A from the catalog → repeat the task. A was never loaded again in <b>${sc.A_never_loaded} of ${sc.cases}</b> cases, and the token budget was still packed in ${sc.budget_still_packed} of ${sc.cases}. <b>Removing 10% of tools mid-stream</b> (3 seeds, tasks still answerable): reading the live catalog keeps ${pct(m("filtered","success"))} success, against ${pct(m("stale","success"))} when trusting stale memory, which also wastes ${m("stale","tokens_on_removed_tools").toFixed(0)} tokens per loadout on tools that no longer exist. Tool search: ${pct(m("vector","success"))}.`}
+ const AN=R.analysis;if(AN)document.getElementById("ci").innerHTML=`Paired over one ordering, Deja minus memory-only is <b>+${(100*AN.diff).toFixed(2)} points (95% CI +${(100*AN.ci95[0]).toFixed(2)} to +${(100*AN.ci95[1]).toFixed(2)})</b>, +${(100*AN.diff_multi).toFixed(2)} on multi-server tasks; Deja alone gets ${AN.deja_only_wins} tasks right that memory-only misses, against ${AN.memory_only_wins} the other way. Of Deja's misses, ${Math.round(100*AN.miss_doesnt_fit)}% don't fit the budget, ${Math.round(100*AN.miss_unseen_tool)}% need a tool no past task has used, and ${Math.round(100*AN.miss_ranked_out)}% were ranked too low.`;
  const Ld=R.load; if(Ld)document.getElementById("loadtxt").innerHTML=`${Ld.readers} concurrent planners reading loadouts from one single-node HydraDB while a learner keeps writing new tasks: <b>${Ld.errors} errors</b>, ${Ld.qps.toFixed(1)} loadouts/s, p50 ${(Ld.p50/1000).toFixed(2)} s, p95 ${(Ld.p95/1000).toFixed(2)} s; ${Ld.writes} tasks learned meanwhile.${Ld.single_reader_qps?` One planner alone gets ${Ld.single_reader_qps.toFixed(1)}/s at p50 ${Ld.single_reader_p50.toFixed(0)} ms, so 16 give ${(Ld.qps/Ld.single_reader_qps).toFixed(1)}× the throughput.`:""} Correct under contention; throughput is the ceiling of one node. HydraDB scales reads by adding query nodes over the same object store, which we haven't done here.`;
  document.getElementById("foot").textContent=`${R.n_tasks.toLocaleString()} tasks · ${R.n_tools.toLocaleString()} tools · ${R.budget.toLocaleString()}-token budget${H.matches_oracle?" · HydraDB loadouts identical to the in-memory twin on all held-out tasks":""}`;
 });

@@ -31,14 +31,14 @@ f.text(0.06, 0.80, "DEJA  ·  built on HydraDB", fontsize=13, color=T3, weight="
 f.text(0.06, 0.56, "Your agent has 2,000 tools.", fontsize=30, weight="bold")
 f.text(0.06, 0.39, "Deja loads the ones it'll call.", fontsize=30, weight="bold", color=BLUE)
 f.text(0.06, 0.13, "Every needed tool in the first loadout, 8,612 tasks run against real MCP servers", fontsize=11, color=T2)
-for yy, val, lab, c in [(0.62, f"{mean('vector', 'overall'):.0f}%", "tool search", T3), (0.34, f"{mean('deja', 'overall'):.0f}%", "Deja", BLUE)]:
+for yy, val, lab, c in [(0.62, f"{mean('search', 'overall'):.0f}%", "hybrid tool search", T3), (0.34, f"{mean('deja', 'overall'):.0f}%", "Deja", BLUE)]:
     f.text(0.80, yy, val, fontsize=40, weight="bold", color=c)
     f.text(0.80, yy - 0.07, lab, fontsize=12, color=T2)
 save(f, "1_cover.png")
 
 # 2. Results: grouped horizontal bars
-methods = ["Tool search", "Vector + popularity", "Deja v1 (no task memory)", "Past-task memory, no graph", "Deja"]
-keys = ["vector", "popularity", "deja-v1", "knn", "deja"]
+methods = ["Tool search (vector)", "Tool search (hybrid)", "Deja v1 (no task memory)", "Past-task memory, no graph", "Deja"]
+keys = ["vector", "search", "deja-v1", "knn", "deja"]
 allt = [mean(k, "overall") for k in keys]
 multi = [mean(k, "multi") for k in keys]
 f = fig(10, 5.6)
@@ -72,7 +72,7 @@ o1 = R["orders"]["1"]; e = o1["curve_edges"]
 k = lambda v: f"{v/1000:.1f}".rstrip("0").rstrip(".") + "k" if v >= 1000 else str(v)
 buckets = [f"{k(a)}–{k(b)}" for a, b in zip(e, e[1:])]
 cv = lambda m: [round(100 * v) for v in o1["curve"][m]]
-series = [("Tool search", cv("vector"), T3, "--"), ("Deja v1", cv("deja-v1"), VIOLET, "-"),
+series = [("Tool search (hybrid)", cv("search"), T3, "--"), ("Deja v1", cv("deja-v1"), VIOLET, "-"),
           ("Memory, no graph", cv("knn"), AQUA, "-"), ("Deja", cv("deja"), BLUE, "-")]
 f = fig(10, 5.6)
 ax = f.add_axes([0.07, 0.14, 0.68, 0.66], facecolor=SURF)

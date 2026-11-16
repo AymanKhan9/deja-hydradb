@@ -7,19 +7,23 @@ H, L = W.get("hydra", {}), W.get("load", {})
 def rng(m, part):
     v = [o[part][m] for o in O]; a, b = 100 * min(v), 100 * max(v)
     return f"{a:.1f}%" if f"{a:.1f}" == f"{b:.1f}" else f"{a:.1f}–{b:.1f}%"
-rows = [("Tool search: vector top-k over tool descriptions", "vector"), ("Load whole servers, vector-ranked", "servers"),
+rows = [("Tool search: vector (bge-small) over tool descriptions", "vector"), ("Tool search: BM25 keywords", "bm25"),
+        ("Tool search: hybrid, reciprocal-rank fusion of vector + BM25", "hybrid"),
+        ("**Tool search: Deja's base alone** (cosine + 0.15 · BM25)", "search"), ("Load whole servers, vector-ranked", "servers"),
         ("Vector + learned popularity (non-graph learner)", "popularity"),
-        ("**Past-task memory, no graph** (20 nearest past tasks vote for their tools)", "knn"),
+        ("**Past-task memory, no graph** (same base; 20 nearest past tasks vote for their tools)", "knn"),
         ("Deja v1, first shipped: word + co-use edges, no task memory", "deja-v1"),
-        ("**Deja**: task memory in HydraDB + co-use hop + word hop", "deja"),
+        ("**Deja**: hybrid base + task memory in HydraDB + co-use hop + word hop", "deja"),
         ("Deja without word edges (ablation)", "deja-no-terms"), ("Deja without co-use edges (ablation)", "deja-no-couse")]
 main = "\n".join(f"| {n} | {rng(m, 'overall')} | {rng(m, 'multi')} |" for n, m in rows)
 B = {b: json.load(open(f"data/results_v2_{b}.json"))["orders"]["1"]["overall"] for b in (1000, 2000, 4000) if os.path.exists(f"data/results_v2_{b}.json")}
 budget = "| token budget | " + " | ".join(f"{b:,}" for b in B) + " |\n|---|" + "---|" * len(B) + "\n" + "\n".join(
-    f"| {n} | " + " | ".join(f"{100*B[b][m]:.1f}%" for b in B) + " |" for n, m in (("Tool search", "vector"), ("Past-task memory, no graph", "knn"), ("Deja", "deja")))
+    f"| {n} | " + " | ".join(f"{100*B[b][m]:.1f}%" for b in B) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja", "deja")))
 o1 = R["orders"]["1"]; e = o1["curve_edges"]
+_w = lambda m: (o1["curve"][m][0] * 50 + o1["curve"][m][1] * 50) / 100
+cold = f"{100*_w('deja'):.0f}% vs {100*_w('search'):.0f}%"
 curve = "| tasks already served | " + " | ".join(f"{a:,}–{b:,}" for a, b in zip(e, e[1:])) + " |\n|---|" + "---|" * (len(e) - 1) + "\n" + "\n".join(
-    f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search", "vector"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
+    f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
 held = (f"**Held out, live from HydraDB:** on {H['n']} tasks the served graph never learned from (all answerable), every tool that worked was "
         f"in the first loadout for **{100*H['deja']:.1f}%** vs tool search {100*H['vector']:.1f}%; loadouts carried a chronically broken tool "
         f"{100*H['deja_broken']:.1f}% of the time vs {100*H['vector_broken']:.1f}% for tool search. The served policy answered with Deja on "
@@ -31,9 +35,32 @@ om = lambda m, k: 100 * float(np.mean([OC[x][m][k] for x in OC]))
 outcome = "\n".join([
     "| | Every tool that worked loaded | Every called tool loaded | Loadout has a chronically broken tool |", "|---|---|---|---|"] +
     [f"| {n} | {om(m, 'succeeded'):.1f}% | {om(m, 'called'):.1f}% | {om(m, 'broken_tool_loaded'):.1f}% |" for n, m in (
-        ("Tool search", "vector"), ("Past-task memory, learning from every call", "knn"), ("Deja, learning from every call", "deja"),
-        ("Past-task memory, successes only", "knn-ok"), ("**Deja, successes only (served)**", "deja-ok"),
-        ("Deja, successes only + reliability penalty (dropped)", "deja-ok+pen"))]) if OC else ""
+        ("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, learning from every call", "knn"),
+        ("Deja, learning from every call", "deja"), ("Past-task memory, successes only", "knn-ok"), ("Deja, successes only", "deja-ok"),
+        ("**Deja, successes only + quarantine (served)**", "deja-ok+quar"),
+        ("Deja, successes only + reliability penalty (dropped)", "deja-ok+pen")) if m in OC[next(iter(OC))]]) if OC else ""
+gain = lambda part: f"{100*np.mean([o[part]['deja'] - o[part]['knn'] for o in O]):.1f}"
+AN = json.load(open("data/analysis_v4.json")) if os.path.exists("data/analysis_v4.json") else {}
+ci = (f"Paired over shuffle 1, Deja minus memory-only is **+{100*AN['diff']:.2f} points (95% bootstrap CI {100*AN['ci95'][0]:+.2f} to "
+      f"{100*AN['ci95'][1]:+.2f})**, and +{100*AN['diff_multi']:.2f} on multi-server tasks ({100*AN['ci95_multi'][0]:+.2f} to {100*AN['ci95_multi'][1]:+.2f}); "
+      f"Deja alone gets {AN['deja_only_wins']} tasks right that memory-only misses, against {AN['memory_only_wins']} the other way.") if AN else ""
+misses = (f"**Where Deja still misses** (shuffle 1, {AN['misses']:,} misses): {100*AN['miss_doesnt_fit']:.0f}% need more tools than fit in "
+          f"2,000 tokens, {100*AN['miss_unseen_tool']:.0f}% need a tool that no past task has used yet, and {100*AN['miss_ranked_out']:.0f}% had every "
+          f"tool in memory but ranked it too low. On the {100*AN['unseen_tasks']:.0f}% of tasks that need a never-used tool, Deja gets "
+          f"{100*AN['unseen_deja']:.1f}% against {100*AN['unseen_search']:.1f}% for its own base alone: memory can't help with a tool it has never seen.") if AN else ""
+AB = json.load(open("data/abstain.json")) if os.path.exists("data/abstain.json") else {}; UN = AB.get("unserved")
+KEY = "abstain_recall_unanswerable"
+def un_table():
+    rows = ["| Allowed wrong abstentions (fit on seed 1) | Shipped rule: caught | Unserved memory: caught, gap repeats | Unserved memory: caught, new gaps only | Combined rule: caught, repeats / new | Combined: wrongly abstained | Combined: caught among first 20 unserved |",
+            "|---|---|---|---|---|---|---|"]
+    T = AB["policies"]["similarity only"]["tradeoff"]
+    for fa, v in UN["budgets"].items():
+        e = v["eval"]; f = lambda view, k, key: " / ".join(f"{100*e[view][sd][k][key]:.0f}%" for sd in ("2", "3"))
+        rows.append(f"| {100*float(fa):.0f}% | {' / '.join(f'{100*T[fa][sd][KEY]:.0f}%' for sd in ('2', '3'))} | "
+                    f"{f('repeats', 'memory', 'caught')} | {f('new_gaps', 'memory', 'caught')} | {f('repeats', 'combined', 'caught')} ; {f('new_gaps', 'combined', 'caught')} | "
+                    f"{f('repeats', 'combined', 'wrong')} | {f('repeats', 'combined', 'caught_first20')} |")
+    return "\n".join(rows)
+untab = un_table() if UN else ""
 AB = json.load(open("data/abstain.json")) if os.path.exists("data/abstain.json") else {}
 def ab_table():
     T = AB["policies"]["similarity only"]["tradeoff"]; G = AB["policies"]["similarity + graph"]["tradeoff"]
@@ -89,16 +116,20 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 
 **Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
 graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
-`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth about 2.5 points overall and about 3
-on multi-server tasks. Per the ablations, the word hop carries the multi-server gain; the co-use hop adds about 1 point
-overall and roughly nothing on multi-server tasks. Our first shipped version (v1) had no task memory and lost to this baseline. A reviewer added the
+`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth {gain('overall')} points overall and
+{gain('multi')} on multi-server tasks (means over the 4 orderings; see the ablation rows for each hop). Our first shipped version (v1) had no task memory and lost to this baseline. A reviewer added the
 baseline, we reproduced it, and we rebuilt around it. The v1 row stays in the table.
 
 Evaluation is **prequential**: every task is scored *before* Deja learns from it, so the x-axis is literally "tasks
 served". Ranges cover 4 orderings (dataset order and 3 shuffles). One row per Toucan `prompt_id`; only 36 of 8,612
 question texts are exact duplicates, and 1.8% of tasks have an earlier task at cosine ≥ 0.95. Weights are not tuned per
-ordering: vote weight 1.0 and K=20 come from one check on shuffle 1, and word weight 0.5 and co-use weight 0.2 are
-unchanged from v1. The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
+ordering. Model choices were made on shuffle 1 only: K=20 neighbours; votes weighted by similarity⁸ (tried 1 and 8); the
+base adds 0.15 · BM25 to cosine (tried 0.05, 0.15, 0.25, 0.35). Word weight 0.5 and co-use weight 0.2 are unchanged from
+v1. The memory-only baseline gets the same base and vote weighting, so the graph's gain is measured like for like.
+
+{ci}
+
+{misses} The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
 HydraDB reads on the held-out set and in `python hydra_store.py`, which also checks the per-task learning path: bulk-load
 300 tasks, ingest 100 one at a time, and require identical loadouts on the next 100.
 
@@ -126,6 +157,13 @@ only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails i
 {outcome}
 
 On the tools that worked it is as good or slightly better, and loadouts carrying a broken tool drop by more than half.
+
+**Quarantine (served).** The `FAILED` edges are read, too: a tool goes into quarantine when at least 4 of its last 5
+recorded outcomes failed, stored as `(:Quarantine)-[:HOLDS]->(:Tool)` and kept in step by the learner. A held tool is
+never scored, except for one task in every 200 where it gets a trial, so a tool that gets fixed can earn its way back
+(two successes in its last five releases it). Two caveats: the "broken tool" measure counts tools that fail in most runs,
+which is close to what the rule removes, so the drop is partly by construction; and the every-called-tool number falls
+further, because quarantined tools that the agent still tried no longer appear.
 It no longer loads tools whose calls failed, so the every-called-tool number falls; both are reported. The graph keeps
 its lead over the memory-only baseline built the same way.
 
@@ -148,6 +186,19 @@ seeds 2 and 3:
 coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. Cold-start fallback
 (plain tool search when the closest past task is below {abtau:.2f}): {fbs}; it helps in the first few hundred tasks and is
 neutral after.
+
+**Remembering what couldn't be served.** The shipped rule forgets every task it abstained on, so the 50th request for a
+missing capability looks as new as the first. Remembering each unserved task (a `Task` node with no `USED` edge) adds
+two signals: how close the nearest unserved past task is, and the unserved share of the 20 nearest past tasks. We report
+two views, because the benchmark's unserved tasks come from held-out servers and naturally repeat: "gap repeats" lets an
+unserved task see earlier unserved tasks from its own servers; "new gaps only" doesn't, which is what the first request
+for a new missing capability looks like. The combined rule abstains if either the shipped rule or the memory rule says so.
+
+{untab}
+
+Most of the gain is the same missing capability being asked for again; there is a smaller real gain on new gaps. This
+needs a signal that a task went unserved (the agent called nothing, or the user said so). The live demo has no such
+signal, every Toucan task is answerable, so it ships in the evaluation and the model, not on the page.
 
 ### Tools come and go
 
@@ -172,7 +223,8 @@ one edge; every read is filtered to the live catalog, whatever memory says.
    load nothing and say why; if no past task is close, use plain tool search; otherwise continue.
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
-   weighted by similarity. `fused = cosine(task, tool) + 1.0 · votes`.
+   weighted by similarity. `fused = base + 1.0 · votes`, where `base = cosine + 0.15 · BM25/max(BM25)` and each neighbour's vote is
+   weighted by similarity⁸ (near neighbours dominate).
 2. **Co-use hop:** from the top 5 of the fused ranking, walk `CO` → `CoLink` → `Tool` to the tools those are
    usually used with (about +1 point overall).
 3. **Word hop:** from the task's 8 rarest words (highest idf), walk `LED` → `Link` → `Tool`, weighted by learned counts.
@@ -193,12 +245,21 @@ HydraDB specifics that shaped the design:
 {load} Correct under contention; throughput is the ceiling of one node on one machine. HydraDB scales reads by adding
 query nodes over the same object store, which we haven't done here.
 
+## Not done yet
+
+- **An agent in the loop.** Every number here is "the right tools were in the loadout". Whether an agent then picks the
+  right tool more often, and spends fewer tokens, with a Deja loadout is the next check.
+- **An MCP proxy.** As a proxy in front of real MCP servers Deja would get call outcomes from `isError`, catalog changes
+  from `tools/list_changed`, and the unserved signal from tasks that end without a call, and could learn from real
+  agent traffic instead of Toucan's generated questions.
+
 ## Limitations
 
 - **Synthetic questions, real execution.** Toucan's questions were generated by an LLM from each server's tool set, so
   similar tasks recur by construction, which favours any past-task memory (ours and the baseline's). Organic agent
   traffic may recur less. The tool calls and their results are real.
-- **Cold start.** Deja is level with tool search for roughly the first 400 tasks it sees (38.8% vs 36.8% on shuffle 1).
+- **Cold start.** Over its first 100 tasks Deja is level with or slightly below its own hybrid base used as plain tool
+  search ({cold}, shuffle 1); after that memory pays off.
   The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
   across a team's agents.
 - **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's

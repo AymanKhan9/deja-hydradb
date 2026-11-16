@@ -1,6 +1,6 @@
 """Prequential first-loadout eval (in-memory oracle): which tools go into the agent's context at a fixed token budget.
 Score each task before learning from it. Gold = tools the agent actually called."""
-import collections, json, math, os, random, sys
+import collections, hashlib, json, math, os, random, sys
 import numpy as np
 from toucan import load, norm
 
@@ -22,6 +22,7 @@ def build(path="data/raw/kimi_*.parquet", cache="data/traces_slim_ok.json"):   #
             if n not in cat: cat[n] = {"name": n, "text": f"{n}: {td['desc']}", "tokens": td["tokens"]}
         server.update(t["tool_server"])
     for n in cat: cat[n]["server"] = server.get(n, n.split("-")[0])
+    global _BM; _BM = BM25(cat, list(cat))     # every caller indexes tools as list(cat)
     tasks = []
     for t in D:
         gold = {c["tool"] for c in t["calls"] if c["tool"] in cat}
@@ -45,6 +46,8 @@ class Learned:
     K, MIN_N = int(os.environ.get("DEJA_K", 10)), int(os.environ.get("DEJA_MIN_N", 2))
     TOPT, KNN = 8, 20          # query only the 8 highest-idf terms; vote with the 20 most similar past tasks
     Q = None                   # task embedding matrix, set by the caller
+    VOTE_POW = 8               # neighbour vote weight = similarity ** 8: near neighbours dominate (v4; chosen on shuffle 1)
+    Q_WIN, Q_FAIL, PROBE = 5, 4, 200   # quarantine: >= 4 of a tool's last 5 outcomes failed; probe it once every 200 tasks
     OUTCOME = False            # learn only from calls that succeeded (served model); False = every called tool (v2 eval)
     def view(s, task):
         """The task as the memory learns it: with OUTCOME, a tool whose calls all failed in this task teaches nothing."""
@@ -55,6 +58,7 @@ class Learned:
     def __init__(s):
         s.led, s.tn, s.co, s.uses, s.df, s.N = collections.defaultdict(collections.Counter), collections.Counter(), collections.defaultdict(collections.Counter), collections.Counter(), collections.Counter(), 0
         s.past, s.pastgold = [], {}                         # past task ids (rows of Q) and the tools each one used
+        s.recent = collections.defaultdict(lambda: collections.deque(maxlen=s.Q_WIN))   # last outcomes per tool (1 ok, 0 failed)
     def neighbours(s, qvec):
         """K most similar past tasks by embedding -> [(task id, weight)]. Plain vector search (numpy), no graph."""
         if not s.past: return []
@@ -64,13 +68,24 @@ class Learned:
     def votes(s, nb):            # Task -USED-> Tool, weighted by similarity (graph version reads the USED edges)
         return {i: s.pastgold[i] for i, _ in nb}
     def knn_scores(s, qvec):
-        nb = s.neighbours(qvec); z = sum(w for _, w in nb)
+        nb = [(i, w ** s.VOTE_POW) for i, w in s.neighbours(qvec)]; z = sum(w for _, w in nb)
         if not z: return {}
         used = s.votes(nb); out = collections.Counter()
         for i, w in nb:
             for g in used.get(i, ()): out[g] += w / z
         return dict(out)
+    def held(s):
+        """Tools whose recent record is clearly bad (>= Q_FAIL of their last Q_WIN outcomes failed). Graph: Quarantine-HOLDS->Tool."""
+        return {n for n, d in s.recent.items() if len(d) == s.Q_WIN and d.count(0) >= s.Q_FAIL}
+    def probing(s, n):
+        """Stateless trial slot: a held tool is let through for one task in every PROBE, so a fixed tool can earn its way
+        back (two successes in its last five and it is released). Stateless, so the graph and the twin agree."""
+        return (s.N + int(hashlib.md5(n.encode()).hexdigest()[:8], 16)) % s.PROBE == 0
+    def quarantined(s):
+        return {n for n in s.held() if not s.probing(n)}
     def ingest(s, task):
+        for g in task.get("gold_ok", ()): s.recent[g].append(1)
+        for g in task.get("failed", ()): s.recent[g].append(0)
         task = s.view(task)
         s.past.append(task["i"]); s.pastgold[task["i"]] = sorted(task["gold"])
         ts = terms(task["q"]); s.N += 1
@@ -113,44 +128,101 @@ LAM, BETA, GAMMA, SEEDS = 1.0, 0.5, 0.2, 5
 def rank(cand, score):
     return sorted(cand, key=lambda n: (-round(float(score(n)), 9), n))   # deterministic ties
 
-def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True, active=None):
+def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True, active=None, base=None):
     """Fused ranking. Returns (ranked tools, parts) so the UI can explain each pick.
     active: the current catalog (set of tool names) — tools outside it are never scored, whatever memory says;
     the caller passes V already restricted to it."""
     keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
     kn = keep(L.knn_scores(qvec)) if use_knn else {}
-    fused = lambda n: sim[nix[n]] + LAM * kn.get(n, 0)
+    b = base if base is not None else base_scores(q, sim)          # base relevance: cosine + BM25 (hybrid)
+    fused = lambda n: b[nix[n]] + LAM * kn.get(n, 0)
     seeds = rank(set(V[:200]) | set(kn), fused)[:SEEDS]           # co-use hop starts from the memory-informed top 5
     ts = keep(L.term_scores(q)) if use_terms else {}
     cs = keep(L.co_scores(seeds)) if use_co else {}
     final = lambda n: fused(n) + BETA * ts.get(n, 0) + GAMMA * cs.get(n, 0)
     return rank(set(V[:200]) | set(kn) | set(ts) | set(cs), final), {"knn": kn, "terms": ts, "co": cs}
 
+class BM25:
+    """Okapi BM25 over each tool's "name: description" (the lexical tool-search baseline)."""
+    def __init__(s, cat, names, k1=1.2, b=0.75):
+        s.n, s.k1, s.b = len(names), k1, b; docs = [norm(cat[n]["text"]).split() for n in names]
+        s.dl = np.array([len(d) for d in docs], dtype=np.float32); s.avg = s.dl.mean(); s.post = collections.defaultdict(dict)
+        for k, d in enumerate(docs):
+            for w, c in collections.Counter(d).items(): s.post[w][k] = c
+    def __call__(s, q):
+        out = np.zeros(s.n, dtype=np.float32)
+        for w in terms(q):
+            p = s.post.get(w)
+            if not p: continue
+            idf = math.log(1 + (s.n - len(p) + 0.5) / (len(p) + 0.5))
+            ks = np.fromiter(p.keys(), int); tf = np.fromiter(p.values(), np.float32)
+            out[ks] += idf * tf * (s.k1 + 1) / (tf + s.k1 * (1 - s.b + s.b * s.dl[ks] / s.avg))
+        return out
+
+_BM = None
+def base_scores(q, sim):
+    """Deja's base relevance for every tool: cosine + HYB_MU * BM25/max(BM25) (plain cosine if HYB_MU = 0)."""
+    if not HYB_MU or _BM is None: return sim
+    bs = _BM(q); return sim + HYB_MU * bs / (bs.max() or 1.0)
+
+def rrf(*rankings, k=60):
+    """Reciprocal-rank fusion of ranked lists (the hybrid tool-search baseline)."""
+    sc = collections.Counter()
+    for r in rankings:
+        for pos, n in enumerate(r): sc[n] += 1 / (k + pos)
+    return sorted(sc, key=lambda n: (-sc[n], n))
+
+HYB_MU = float(os.environ.get("DEJA_HYB_MU", 0.15))   # base relevance = cosine + 0.15 * BM25/max (v4; chosen on shuffle 1)
+EXPERIMENT = os.environ.get("DEJA_EXPERIMENT", "")   # extra variants for model-choice runs (comma list: pow8,hyb05,hyb15)
+
 def run(cat, tasks, Q, TE, names, budget, seed=None, store=Learned):
     idx = list(range(len(tasks)))
     if seed is not None: random.Random(seed).shuffle(idx)
-    store.Q = Q; L = store(); res = []; nix = {n: k for k, n in enumerate(names)}
+    store.Q = Q; L = store(); res = []; nix = {n: k for k, n in enumerate(names)}; bm = BM25(cat, names)
     for pos, i in enumerate(idx):
         t = tasks[i]; sim = TE @ Q[i]; order = np.argsort(-sim, kind="stable")
         V = [names[k] for k in order[:400]]
+        bs = bm(t["q"]); Bm = [names[k] for k in np.argsort(-bs, kind="stable")[:400]]; Hy = rrf(V, Bm)[:400]
+        hyb = lambda mu: sim + mu * bs / (bs.max() or 1.0)
         bysrv = {}
         for n in V: bysrv.setdefault(cat[n]["server"], []).append(n)   # V is sim-ordered, so servers rank by best tool
         S = [n for ns in bysrv.values() for n in ns]
         P = rank(V, lambda n: sim[nix[n]] + 0.02 * math.log1p(L.uses[n]))
-        kn = L.knn_scores(Q[i])
-        K = rank(set(V[:200]) | set(kn), lambda n: sim[nix[n]] + LAM * kn.get(n, 0))
+        kn = L.knn_scores(Q[i]); bb = base_scores(t["q"], sim)
+        K = rank(set(V[:200]) | set(kn), lambda n: bb[nix[n]] + LAM * kn.get(n, 0))      # memory-only, same base + votes
+        SB = rank(set(V[:200]), lambda n: bb[nix[n]])                                    # tool search on Deja's base
         ts1, cs1 = Learned.term_scores_all(L, t["q"]), L.co_scores(V[:SEEDS])
         v1 = rank(set(V[:200]) | set(ts1) | set(cs1), lambda n: sim[nix[n]] + 0.5 * ts1.get(n, 0) + 0.2 * cs1.get(n, 0))
-        r = {"pos": pos, "multi": len(t["gold_servers"]) > 1, "n_gold": len(t["gold"])}
+        r = {"pos": pos, "multi": len(t["gold_servers"]) > 1, "n_gold": len(t["gold"]),
+             "unseen": any(L.uses[g] == 0 for g in t["gold"]), "fits": sum(cat[g]["tokens"] for g in t["gold"]) <= budget}
         for name, ranked in (("vector", V), ("servers", S), ("popularity", P), ("knn", K), ("deja-v1", v1),
                              ("deja", deja_rank(L, t["q"], Q[i], sim, V, nix)[0]),
                              ("deja-no-terms", deja_rank(L, t["q"], Q[i], sim, V, nix, use_terms=False)[0]),
-                             ("deja-no-couse", deja_rank(L, t["q"], Q[i], sim, V, nix, use_co=False)[0])):
+                             ("deja-no-couse", deja_rank(L, t["q"], Q[i], sim, V, nix, use_co=False)[0]),
+                             ("bm25", Bm), ("hybrid", Hy), ("search", SB)) + extra(L, t, Q[i], sim, V, nix, hyb):
             lo = set(pack(ranked, cat, budget)); r[name] = t["gold"] <= lo
         res.append(r); L.ingest(t)
     return res
 
-M = ["vector", "servers", "popularity", "knn", "deja-v1", "deja", "deja-no-terms", "deja-no-couse"]
+def extra(L, t, qv, sim, V, nix, hyb):
+    out = []
+    for e in filter(None, EXPERIMENT.split(",")):
+        if e == "pow8":
+            L.VOTE_POW = 8; out.append(("deja-pow8", deja_rank(L, t["q"], qv, sim, V, nix)[0])); del L.VOTE_POW
+        elif e.startswith("hyb"):
+            mu = int(e[3:]) / 100; out.append((f"deja-{e}", deja_rank(L, t["q"], qv, sim, V, nix, base=hyb(mu))[0]))
+        elif e.startswith("pow8hyb"):      # both changes together
+            L.VOTE_POW = 8; out.append((f"deja-{e}", deja_rank(L, t["q"], qv, sim, V, nix, base=hyb(int(e[7:]) / 100))[0])); del L.VOTE_POW
+        elif e.startswith("knnhyb"):       # memory-only baseline on the same hybrid base (fair comparison)
+            b = hyb(int(e[6:]) / 100); kn = L.knn_scores(qv)
+            out.append((f"knn-{e[3:]}", rank(set(V[:200]) | set(kn), lambda n: b[nix[n]] + LAM * kn.get(n, 0))))
+        elif e.startswith("basehyb"):      # tool search alone on the hybrid base (no memory)
+            b = hyb(int(e[7:]) / 100); out.append((f"search-{e[4:]}", rank(set(V[:200]), lambda n: b[nix[n]])))
+    return tuple(out)
+
+M = ["vector", "servers", "popularity", "knn", "deja-v1", "deja", "deja-no-terms", "deja-no-couse", "bm25", "hybrid", "search"] + \
+    [{"pow8": "deja-pow8"}.get(e, f"knn-{e[3:]}" if e.startswith("knnhyb") else f"search-{e[4:]}" if e.startswith("basehyb") else f"deja-{e}")
+     for e in filter(None, EXPERIMENT.split(","))]
 EDGES = [0, 50, 100, 200, 400, 800, 1600, 3200, 6400]          # log-spaced: the cold start is visible
 def aggregate(res):
     e = EDGES + [len(res)]
@@ -172,9 +244,24 @@ if __name__ == "__main__":
     print(f"catalog {len(cat)} tools / {len(set(c['server'] for c in cat.values()))} servers; tasks {len(tasks)}; multi-server gold {np.mean([len(t['gold_servers'])>1 for t in tasks]):.0%}; "
           f"median tool tokens {np.median([c['tokens'] for c in cat.values()])}, budget {budget}")
     TE = embed([cat[n]["text"] for n in names], "data/tool_emb.npy"); Q = embed([t["q"] for t in tasks], "data/q_emb.npy")
+    if os.environ.get("DEJA_ANALYSIS"):      # paired CI (Deja - memory-only) and why Deja misses, shuffle 1 -> data/analysis_v4.json
+        res = run(cat, tasks, Q, TE, names, budget, 1); d = np.array([r["deja"] - r["knn"] for r in res], float)
+        bs = [np.random.default_rng(k).choice(d, len(d)).mean() for k in range(2000)]
+        dm = np.array([r["deja"] - r["knn"] for r in res if r["multi"]], float)
+        bm = [np.random.default_rng(k).choice(dm, len(dm)).mean() for k in range(2000)]
+        miss = [r for r in res if not r["deja"]]
+        A = {"diff": float(d.mean()), "ci95": [float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))],
+             "diff_multi": float(dm.mean()), "ci95_multi": [float(np.percentile(bm, 2.5)), float(np.percentile(bm, 97.5))],
+             "deja_only_wins": int((d > 0).sum()), "memory_only_wins": int((d < 0).sum()),
+             "misses": len(miss), "miss_doesnt_fit": float(np.mean([not r["fits"] for r in miss])),
+             "miss_unseen_tool": float(np.mean([r["fits"] and r["unseen"] for r in miss])),
+             "miss_ranked_out": float(np.mean([r["fits"] and not r["unseen"] for r in miss])),
+             "unseen_tasks": float(np.mean([r["unseen"] for r in res])),
+             "unseen_deja": float(np.mean([r["deja"] for r in res if r["unseen"]])), "unseen_search": float(np.mean([r["search"] for r in res if r["unseen"]]))}
+        json.dump(A, open("data/analysis_v4.json", "w"), indent=1); print(A); sys.exit()
     orders = [None if x == "dataset" else int(x) for x in (sys.argv[2].split(",") if len(sys.argv) > 2 else ["dataset", "1", "2", "3"])]
     out = {"budget": budget, "n_tasks": len(tasks), "n_tools": len(cat), "weights": {"lambda": LAM, "beta": BETA, "gamma": GAMMA, "knn": Learned.KNN, "top_terms": Learned.TOPT}, "orders": {}}
     for sd in orders:
         res = run(cat, tasks, Q, TE, names, budget, sd); summarize(res, f"order={sd or 'dataset'}")
         out["orders"][str(sd or "dataset")] = aggregate(res)
-    json.dump(out, open(f"data/results_v2_{budget}.json", "w"), indent=1)
+    json.dump(out, open(f"data/results_v2_{budget}{'_exp' if EXPERIMENT else ''}.json", "w"), indent=1)   # experiments never overwrite

@@ -56,7 +56,11 @@ class HydraLearned(Learned):
     def ingest(s, task):
         """Incremental write after each task. Task memory is append-only; counts rewrite the touched terms' current top-K
         links. A link that later drops out of a top K stays in the graph, and term_scores cuts it at read time."""
-        super().ingest(task)
+        before = Learned.held(s); super().ingest(task); after = Learned.held(s)
+        if before != after:            # keep (:Quarantine)-[:HOLDS]->(:Tool) in step with the learner
+            s.db.nodes("Quarantine", [{"id": QUARANTINE, "key": "quarantine"}], ["key"])
+            s.db.edges("HOLDS", [(QUARANTINE, hid("tool", n)) for n in after - before])
+            for n in before - after: s.db.q("MATCH (q {id: $q})-[r:HOLDS]->(t {id: $t}) DELETE r", q=QUARANTINE, t=hid("tool", n))
         lk = [(w, g) for w in terms(task["q"]) for g, _ in s.links(w)]
         v = s.view(task)
         co = {(a, b) for a in v["gold"] for b in v["gold"] if a != b} | {tuple(f) for f in v["flows"]}
@@ -66,7 +70,13 @@ class HydraLearned(Learned):
         for t in tasks: Learned.ingest(s, t)
         lk = [(w, g) for w in s.led for g, _ in s.links(w)]; co = [(a, b) for a, c in s.co.items() for b in c]
         s._write(tasks, lk, co, set(s.uses) | {b for _, b in co} | {a for a, _ in co})
+        s.db.nodes("Quarantine", [{"id": QUARANTINE, "key": "quarantine"}], ["key"])
+        s.db.edges("HOLDS", [(QUARANTINE, hid("tool", n)) for n in Learned.held(s)])
         return len(tasks), len(lk), len(co)
+    def held(s):
+        """Tools in quarantine, read from the graph (one id-only batched read)."""
+        rows = s.db.q("UNWIND $rows AS row MATCH (a {id: row.id})-[:HOLDS]->(b) RETURN row.id AS src, b.id AS dst", rows=[{"id": QUARANTINE}])
+        return {s.tool_names[r["dst"]] for r in rows}
     def votes(s, nb):
         """Task -USED-> Tool for the neighbour tasks: one id-anchored batched read, no property hydration."""
         if not nb: return {}
@@ -108,7 +118,7 @@ class HydraLearned(Learned):
         for r in rows: out[r["b"]] = max(out[r["b"]], r["n"] / r["uses"] / (1 + rank[r["a"]]))
         return out
 
-CATALOG = hid("catalog", "deja")
+CATALOG = hid("catalog", "deja"); QUARANTINE = hid("quarantine", "deja")
 
 def write_catalog(db, tool_names):
     """The live catalog is graph state: (:Catalog)-[:LISTS]->(:Tool). Labels first, then edges."""
@@ -137,11 +147,14 @@ if __name__ == "__main__":
     TE, Q = retr.embed(None, "data/tool_emb.npy"), retr.embed(None, "data/q_emb.npy")
     Learned.Q = Q; HydraLearned.tool_names = {hid("tool", n): n for n in cat}
     Learned.OUTCOME = "--all-calls" not in sys.argv          # check the served mode by default
-    H = HydraLearned(); H.bulk_load(tasks[:300])
-    for t in tasks[300:400]: H.ingest(t)                 # the per-task learning path, one write batch per task
+    H = HydraLearned(); H.bulk_load(tasks[:1500])
+    for t in tasks[1500:1800]: H.ingest(t)                 # the per-task learning path, one write batch per task
     T = twin(H); bad = 0
-    for t in tasks[400:500]:
+    for t in tasks[1800:1900]:
         sim = TE @ Q[t["i"]]; V = [names[k] for k in np.argsort(-sim, kind="stable")[:400]]
-        a = retr.deja_rank(H, t["q"], Q[t["i"]], sim, V, nix)[0]; b = retr.deja_rank(T, t["q"], Q[t["i"]], sim, V, nix)[0]
+        qa, qb = H.quarantined(), T.quarantined(); bad += qa != qb          # quarantine: graph edges vs the learner's record
+        act = set(names) - qa; V = [n for n in V if n in act]
+        a = retr.deja_rank(H, t["q"], Q[t["i"]], sim, V, nix, active=act)[0]; b = retr.deja_rank(T, t["q"], Q[t["i"]], sim, V, nix, active=act)[0]
         bad += retr.pack(a, cat, 2000) != retr.pack(b, cat, 2000)
-    print("bulk_load 300 + ingest 100 one at a time; graph vs twin loadout mismatches on the next 100:", bad); assert bad == 0
+    print(f"bulk_load 1500 + ingest 300 one at a time; graph vs twin mismatches (loadouts + quarantine sets) on the next 100: {bad}; "
+          f"tools in quarantine: {len(T.held())}"); assert bad == 0

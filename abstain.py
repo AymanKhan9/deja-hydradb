@@ -39,8 +39,9 @@ def held_out_servers(seed, frac=0.10, near=0.80):
     return {srv[i] for i in out}
 
 SUBST = 0.80   # tool-tool cosine: substitutes measured 0.83-0.93, non-substitutes 0.52-0.78 (hand-checked pairs)
-FEATS = ["s_mem", "s_tool", "vote_top", "vote_agree", "srv_spread", "co_coh"]
+FEATS = ["s_mem", "s_tool", "vote_top", "vote_agree", "srv_spread", "co_coh"]   # graph-signal experiment (kept for the record)
 SIM_ONLY = ["s_mem", "s_tool"]
+MEM = ["s_mem", "s_tool", "s_un", "un_frac"]
 
 def stream(seed):
     out = held_out_servers(seed)
@@ -49,8 +50,17 @@ def stream(seed):
     sub = lambda t: max(float((TE[act_ix] @ TE[nix[g]]).max()) for g in t["gold"])        # closest remaining substitute
     un = [t for t in tasks if t["gold_servers"] <= out and sub(t) < SUBST]                 # nothing left resembles any needed tool
     order = ans + un; random.Random(seed).shuffle(order); L = Learned(); rows = []
+    pu, srv_of = [], {t["i"]: t["gold_servers"] for t in tasks}     # memory of tasks Deja could NOT serve (Task node, no USED edge)
     for pos, t in enumerate(order):
-        q = Q[t["i"]]; sim = TE @ q; a_sim = sim[act_ix]
+        q = Q[t["i"]]; sim = TE @ q; a_sim = sim[act_ix]; isun = t["gold_servers"] <= out
+        sa = Q[L.past] @ q if L.past else np.zeros(0)
+        def unserved(mem):          # closest unserved past task; similarity-weighted unserved share of the 20 nearest past tasks
+            su = Q[mem] @ q if mem else np.zeros(0); allw = np.concatenate([sa, su]); lab = np.concatenate([np.zeros(len(sa)), np.ones(len(su))])
+            top = np.argsort(-allw, kind="stable")[:20]; w = np.maximum(allw[top], 0)
+            return (float(su.max()) if len(su) else 0.0), (float((w * lab[top]).sum() / w.sum()) if w.sum() else 0.0)
+        s_un, un_frac = unserved(pu)
+        # "new gap" view: an unserved task may not see earlier unserved tasks from its own servers (no repeats of this gap)
+        s_un_x, un_frac_x = unserved([j for j in pu if not (srv_of[j] & t["gold_servers"])]) if isun else (s_un, un_frac)
         V = [names[act_ix[k]] for k in np.argsort(-a_sim, kind="stable")[:400]]
         nb = L.neighbours(q); ranked, parts = deja_rank(L, t["q"], q, sim, V, nix, active=active)
         kn = parts["knn"]; top5 = ranked[:5]
@@ -62,12 +72,16 @@ def stream(seed):
         r = {"pos": pos, "un": t["gold_servers"] <= out, "multi": len(t["gold_servers"]) > 1,
              "s_mem": nb[0][1] if nb else 0.0, "s_tool": float(a_sim.max()), "vote_top": votes[0] if votes else 0.0,
              "vote_agree": float(agree), "srv_spread": -len({cat[n]["server"] for n in top5}),       # fewer servers = more coherent
-             "co_coh": np.mean([L.co[a][b] > 0 for a, b in pairs]) if pairs else 0.0}
+             "co_coh": np.mean([L.co[a][b] > 0 for a, b in pairs]) if pairs else 0.0,
+             "s_un": s_un, "un_frac": un_frac, "s_un_x": s_un_x, "un_frac_x": un_frac_x, "seen_un": len(pu)}
         if not r["un"]:
-            r["deja_ok"] = t["gold"] <= set(pack(ranked, cat, BUDGET)); r["vec_ok"] = t["gold"] <= set(pack(V, cat, BUDGET))
-            kr = rank(set(V[:200]) | set(kn), lambda n: sim[nix[n]] + retr.LAM * kn.get(n, 0))
+            bb = retr.base_scores(t["q"], sim)          # tool search = Deja's hybrid base alone (the fallback uses it too)
+            r["deja_ok"] = t["gold"] <= set(pack(ranked, cat, BUDGET))
+            r["vec_ok"] = t["gold"] <= set(pack(rank(set(V[:200]), lambda n: bb[nix[n]]), cat, BUDGET))
+            kr = rank(set(V[:200]) | set(kn), lambda n: bb[nix[n]] + retr.LAM * kn.get(n, 0))
             r["knn_ok"] = t["gold"] <= set(pack(kr, cat, BUDGET))
             L.ingest(t)
+        else: pu.append(t["i"])      # needs a signal that the task went unserved (agent called nothing / user said so)
         rows.append(r)
     return {"seed": seed, "held_servers": len(out), "n_ans": len(ans), "n_un": len(un), "rows": rows}
 
@@ -120,6 +134,35 @@ if __name__ == "__main__":
             print(f"[{label}] seed {s}: abstains on {e['deja']['abstain_recall_unanswerable']:.1%} of unanswerable, wrongly on "
                   f"{e['deja']['false_abstain_answerable']:.1%} of answerable; answerable success Deja {e['deja']['answerable_success']:.1%} "
                   f"(no abstain {e['deja']['answerable_success_no_abstain']:.1%}), memory-only {e['knn']['answerable_success']:.1%}")
+    # 2b) memory of unserved tasks: alone, and combined with the similarity rule (abstain if either says so).
+    #     Thresholds fit on seed 1 for a wrong-abstain budget; tested on seeds 2,3 both as-is (gaps can repeat) and on the
+    #     "new gap" features (an unserved task never sees earlier unserved tasks from its own servers).
+    X = lambda R, feats, x=False: np.array([[r[(f + "_x") if x and f in ("s_un", "un_frac") else f] for f in feats] for r in R])
+    R1 = runs[1]["rows"]; y1 = np.array([not r["un"] for r in R1], float)
+    sc_s, _ = fit(X(R1, SIM_ONLY), y1); sc_m, wm = fit(X(R1, MEM), y1); ps, pm = sc_s(X(R1, SIM_ONLY)), sc_m(X(R1, MEM))
+    def report(R, ab):
+        un = np.array([r["un"] for r in R]); first = np.array([r["seen_un"] < 20 for r in R]); ok = np.array([r.get("deja_ok", False) for r in R])
+        return {"caught": float(ab[un].mean()), "wrong": float(ab[~un].mean()), "caught_first20": float(ab[un & first].mean()),
+                "answerable_success": float((ok & ~ab)[~un].mean())}
+    out["unserved"] = {"weights": {MEM[k]: v for k, v in wm.items()}, "params": sc_m.params, "budgets": {}}
+    for fa in (0.02, 0.05, 0.10):
+        tm = float(np.quantile(pm[y1 == 1], fa)); lo, hi = 0.0, fa                     # combined: one quantile q for both rules
+        for _ in range(40):
+            q = (lo + hi) / 2; ab = (ps < np.quantile(ps[y1 == 1], q)) | (pm < np.quantile(pm[y1 == 1], q))
+            lo, hi = (q, hi) if ab[y1 == 1].mean() < fa else (lo, q)
+        tsc, tmc = float(np.quantile(ps[y1 == 1], lo)), float(np.quantile(pm[y1 == 1], lo))
+        e = {}
+        for sd in (2, 3):
+            R = runs[sd]["rows"]
+            for view, x in (("repeats", False), ("new_gaps", True)):
+                e.setdefault(view, {})[sd] = {"memory": report(R, sc_m(X(R, MEM, x)) < tm),
+                                              "combined": report(R, (sc_s(X(R, SIM_ONLY)) < tsc) | (sc_m(X(R, MEM, x)) < tmc))}
+        out["unserved"]["budgets"][str(fa)] = {"thr_memory": tm, "thr_combined": [tsc, tmc], "eval": e}
+        for view in ("repeats", "new_gaps"):
+            for k in ("memory", "combined"):
+                print(f"   [unserved {k}, {view}] budget {fa:.0%}: caught " + " / ".join(f"{e[view][sd][k]['caught']:.0%}" for sd in (2, 3)) +
+                      ", wrong " + " / ".join(f"{e[view][sd][k]['wrong']:.1%}" for sd in (2, 3)) +
+                      ", caught among first 20 unserved " + " / ".join(f"{e[view][sd][k]['caught_first20']:.0%}" for sd in (2, 3)), flush=True)
     # 3) cold-start fallback: use tool search when the nearest past task is far; switch threshold fit on seed 1
     def fb(R, tau, mode="deja"): return np.mean([(r["vec_ok"] if r["s_mem"] < tau else r[f"{mode}_ok"]) for r in R if not r["un"]])
     R1 = runs[1]["rows"]; taus = np.round(np.arange(0.0, 0.96, 0.01), 2)
