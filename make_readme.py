@@ -49,6 +49,22 @@ misses = (f"**Where Deja still misses** (shuffle 1, {AN['misses']:,} misses): {1
           f"tool in memory but ranked it too low. On the {100*AN['unseen_tasks']:.0f}% of tasks that need a never-used tool, Deja gets "
           f"{100*AN['unseen_deja']:.1f}% against {100*AN['unseen_search']:.1f}% for its own base alone: memory can't help with a tool it has never seen.") if AN else ""
 AB = json.load(open("data/abstain.json")) if os.path.exists("data/abstain.json") else {}; UN = AB.get("unserved")
+AG = json.load(open("data/agent_check.json")) if os.path.exists("data/agent_check.json") else {}
+if AG:
+    a_, s_ = AG["conditions"]["deja"], AG["conditions"]["search"]; pr = AG["paired"]
+    agent = (f"Every number above is \"the right tools were in the loadout\". To check that this changes what an agent does, Claude Opus 5.5 "
+             f"(via OpenRouter, medium effort) got each of the {AG['n_tasks']} held-out tasks twice, once with Deja's live loadout and once with "
+             f"the hybrid tool search's, and we scored the **first tool it called** (`agent_check.py`).\n\n"
+             f"| | Deja's loadout | Tool search's loadout |\n|---|---|---|\n"
+             f"| First call was a tool that worked in the recorded run | **{100*a_['worked']:.1f}%** | {100*s_['worked']:.1f}% |\n"
+             f"| First call matched the recorded agent's first working call | {100*a_['first']:.1f}% | {100*s_['first']:.1f}% |\n"
+             f"| Model called no tool (said none fits) | {100*a_['no_tool_called']:.1f}% | {100*s_['no_tool_called']:.1f}% |\n"
+             f"| Prompt tokens per request | {a_['mean_input_tokens']:,.0f} | {s_['mean_input_tokens']:,.0f} |\n\n"
+             f"Paired: **+{100*pr['diff_worked']:.1f} points (95% bootstrap CI +{100*pr['ci95'][0]:.1f} to +{100*pr['ci95'][1]:.1f})**; Deja's "
+             f"loadout was better on {pr['deja_only']} tasks and worse on {pr['search_only']}, at the same prompt size. "
+             f"{a_['errors'] + s_['errors']} of {2*AG['n_tasks']} requests failed on the provider's credit limit and count as misses for both. "
+             f"One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success.")
+else: agent = ""
 KEY = "abstain_recall_unanswerable"
 def un_table():
     rows = ["| Allowed wrong abstentions (fit on seed 1) | Shipped rule: caught | Unserved memory: caught, gap repeats | Unserved memory: caught, new gaps only | Combined rule: caught, repeats / new | Combined: wrongly abstained | Combined: caught among first 20 unserved |",
@@ -245,10 +261,12 @@ HydraDB specifics that shaped the design:
 {load} Correct under contention; throughput is the ceiling of one node on one machine. HydraDB scales reads by adding
 query nodes over the same object store, which we haven't done here.
 
+## With an agent in the loop
+
+{agent}
+
 ## Not done yet
 
-- **An agent in the loop.** Every number here is "the right tools were in the loadout". Whether an agent then picks the
-  right tool more often, and spends fewer tokens, with a Deja loadout is the next check.
 - **An MCP proxy.** As a proxy in front of real MCP servers Deja would get call outcomes from `isError`, catalog changes
   from `tools/list_changed`, and the unserved signal from tasks that end without a call, and could learn from real
   agent traffic instead of Toucan's generated questions.

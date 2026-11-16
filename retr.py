@@ -27,7 +27,8 @@ def build(path="data/raw/kimi_*.parquet", cache="data/traces_slim_ok.json"):   #
     for t in D:
         gold = {c["tool"] for c in t["calls"] if c["tool"] in cat}
         ok = {c["tool"] for c in t["calls"] if c["tool"] in cat and c.get("ok", True)}      # tools with >=1 successful call
-        if gold: tasks.append({"i": len(tasks), "q": t["question"], "gold": gold, "gold_ok": ok, "failed": gold - ok, "servers": t["servers"], "gold_servers": {cat[g]["server"] for g in gold},
+        first_ok = next((c["tool"] for c in t["calls"] if c["tool"] in cat and c.get("ok", True)), None)   # recorded agent's first working call
+        if gold: tasks.append({"i": len(tasks), "q": t["question"], "gold": gold, "gold_ok": ok, "failed": gold - ok, "first_ok": first_ok, "servers": t["servers"], "gold_servers": {cat[g]["server"] for g in gold},
                                "flows": [(t["calls"][i]["tool"], t["calls"][j]["tool"]) for i, j, _, _ in t["flows"]]})
     return cat, tasks
 

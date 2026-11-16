@@ -6,7 +6,7 @@
 set -euo pipefail
 HOST="$1"; cd "$(dirname "$0")"
 rsync -az --delete --exclude .venv --exclude .hydradb --exclude __pycache__ --exclude data/raw --exclude '.git' \
-  --include 'data/' --include 'data/traces_slim_ok.json' --include 'data/abstain.json' --include 'data/outcome.json' --include 'data/lifecycle.json' --include 'data/*.npy' --include 'data/results_v2_*.json' --include 'data/load.json' --include 'data/analysis_v4.json' \
+  --include 'data/' --include 'data/traces_slim_ok.json' --include 'data/abstain.json' --include 'data/outcome.json' --include 'data/lifecycle.json' --include 'data/*.npy' --include 'data/results_v2_*.json' --include 'data/load.json' --include 'data/analysis_v4.json' --include 'data/agent_check.json' \
   --exclude 'data/*' ./ "$HOST":deja/
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail

@@ -196,10 +196,21 @@ HydraDB specifics that shaped the design:
 16 concurrent planners computing full loadouts (task-vote, word and co-use reads) from one single-node HydraDB while a learner keeps writing new tasks: **0 errors**, 10.3 loadouts/s, p50 1528 ms, p95 2413 ms, 36 tasks learned meanwhile. A single planner gets 2.4/s at p50 418 ms, so 16 planners give 4.4× the throughput. Correct under contention; throughput is the ceiling of one node on one machine. HydraDB scales reads by adding
 query nodes over the same object store, which we haven't done here.
 
+## With an agent in the loop
+
+Every number above is "the right tools were in the loadout". To check that this changes what an agent does, Claude Opus 5.5 (via OpenRouter, medium effort) got each of the 199 held-out tasks twice, once with Deja's live loadout and once with the hybrid tool search's, and we scored the **first tool it called** (`agent_check.py`).
+
+| | Deja's loadout | Tool search's loadout |
+|---|---|---|
+| First call was a tool that worked in the recorded run | **63.3%** | 44.2% |
+| First call matched the recorded agent's first working call | 55.3% | 38.2% |
+| Model called no tool (said none fits) | 4.0% | 9.5% |
+| Prompt tokens per request | 3,256 | 3,279 |
+
+Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was better on 41 tasks and worse on 3, at the same prompt size. 2 of 398 requests failed on the provider's credit limit and count as misses for both. One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success.
+
 ## Not done yet
 
-- **An agent in the loop.** Every number here is "the right tools were in the loadout". Whether an agent then picks the
-  right tool more often, and spends fewer tokens, with a Deja loadout is the next check.
 - **An MCP proxy.** As a proxy in front of real MCP servers Deja would get call outcomes from `isError`, catalog changes
   from `tools/list_changed`, and the unserved signal from tasks that end without a call, and could learn from real
   agent traffic instead of Toucan's generated questions.
