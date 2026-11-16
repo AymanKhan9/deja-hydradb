@@ -10,6 +10,10 @@ needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sh
 
 ## Results
 
+**The served model learns only from tool calls that worked** (12–15% of recorded calls errored), abstains when nothing in
+the catalog fits, falls back to plain tool search when memory has nothing close, and reads the live tool catalog from the
+graph. Each of those is measured below. First, the core comparison, which learns from and scores *every called tool*:
+
 8,612 tasks run against real MCP servers (Toucan-1.5M: questions LLM-generated from each server's tools, tool calls
 really executed) · 2,236 tools across 367 servers · 2,000-token budget.
 Metric: share of tasks where **every** tool the agent called was already in its **first** loadout.
@@ -25,7 +29,7 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 | Deja without word edges (ablation) | 65.7–66.3% | 37.2–37.6% |
 | Deja without co-use edges (ablation) | 65.8–66.4% | 39.5–40.8% |
 
-**Held out, live from HydraDB:** on 200 tasks the served graph never learned from: Deja 75.5%, past-task memory alone 72.5%, tool search 39.0%. Graph reads per loadout p50 90 ms / p95 161 ms. Every served loadout is identical to the in-memory twin (`matches_oracle: True`).
+**Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **76.4%** vs tool search 40.2%; loadouts carried a chronically broken tool 21.5% of the time vs 39.0% for tool search. The served policy answered with Deja on 198, fell back to tool search on 0 and abstained on 2. Graph reads per loadout p50 89 ms / p95 178 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
 
 **Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
 graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
@@ -63,16 +67,76 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 | Past-task memory, no graph | 50.9% | 64.9% | 74.0% |
 | Deja | 52.3% | 67.2% | 76.8% |
 
+### Learning only from calls that worked
+
+`(:Task)-[:USED]->(:Tool)` used to record that a tool was *called*, so a call that errored still earned votes. Toucan
+stores each executed call's response; a call counts as failed if its response opens with an error (HTTP 4xx/5xx,
+missing API key, crash, "unknown tool"). Hand-check: 40/40 sampled flags were real failures, and 28/30 unflagged
+responses were real successes (the two misses' patterns were then added). 21% of tasks contain a call that never
+succeeded. The served model writes the outcome as the edge type, `USED` for successes and `FAILED` for failures, and
+only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails in ≥ 80% of the ≥ 10 tasks that call it:
+
+| | Every tool that worked loaded | Every called tool loaded | Loadout has a chronically broken tool |
+|---|---|---|---|
+| Tool search | 40.0% | 37.4% | 35.0% |
+| Past-task memory, learning from every call | 67.1% | 64.8% | 43.1% |
+| Deja, learning from every call | 69.3% | 67.2% | 43.9% |
+| Past-task memory, successes only | 67.7% | 60.3% | 21.4% |
+| **Deja, successes only (served)** | 69.9% | 61.9% | 18.8% |
+| Deja, successes only + reliability penalty (dropped) | 63.5% | 51.5% | 3.4% |
+
+On the tools that worked it is as good or slightly better, and loadouts carrying a broken tool drop by more than half.
+It no longer loads tools whose calls failed, so the every-called-tool number falls; both are reported. The graph keeps
+its lead over the memory-only baseline built the same way.
+
+### Knowing when nothing fits
+
+Toucan has no "no suitable tool" tasks, so we built them. Cluster servers by tool embeddings (single-linkage at cosine
+0.85), hold out whole clusters plus every server within 0.80 of them (3 seeds, about 37 servers each), and call a task
+unanswerable only if all its servers were removed **and** no remaining tool resembles any tool it needed (tool-tool
+cosine < 0.80; hand-checked substitutes score 0.83–0.93, non-substitutes 0.52–0.78). Without that substitute check,
+about half the "unanswerable" weather tasks still had a working weather server left. Unanswerable tasks per seed:
+431, 317, 368.
+
+How well each signal separates answerable from unanswerable tasks (AUROC, 3 seeds, warm memory): closest past task 0.84–0.89, best tool match 0.66–0.78, top vote share 0.70–0.81, neighbour agreement 0.70–0.78, server spread 0.41–0.45, co-use coherence 0.52–0.54.
+The abstain rule is a two-feature logistic regression (closest past task, best tool match) fit on seed 1 and tested on
+seeds 2 and 3:
+
+| Allowed wrong abstentions (fit on seed 1) | No-fit tasks caught (seed 2 / 3) | Answerable wrongly abstained (seed 2 / 3) | Same, with graph signals added: caught |
+|---|---|---|---|
+| 2% | 21% / 12% | 2% / 2% | 20% / 11% |
+| 5% (served) | 46% / 31% | 5% / 5% | 46% / 29% |
+| 10% | 67% / 49% | 11% / 11% | 69% / 50% |
+| 20% | 83% / 71% | 22% / 21% | 84% / 69% |
+
+**The graph doesn't help here.** Adding the graph signals (vote share, neighbour agreement, server spread, co-use
+coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. Cold-start fallback
+(plain tool search when the closest past task is below 0.69): 69.5% → 69.6% (seed 2), 69.8% → 69.9% (seed 3); it helps in the first few hundred tasks and is
+neutral after.
+
+### Tools come and go
+
+The catalog is graph state: `(:Catalog)-[:LISTS]->(:Tool)`. When a server drops a tool from `tools/list`, Deja deletes
+one edge; every read is filtered to the live catalog, whatever memory says.
+
+**The removal test, on HydraDB:** learn a task that used tool A → remove A from the catalog → repeat the task. Over 40 cases, A was never loaded again (40/40) and the token budget was still packed (40/40).
+
+**Removing 10% of tools mid-stream** (3 seeds, tasks still answerable afterwards): reading the live catalog keeps 74.1% success, against 72.8% when trusting stale memory, which also spends 140 tokens per loadout on tools that no longer exist. Tool search: 40.6%.
+
 ## How it works
 
 ![how it works](docs/img/4_how_it_works.png)
 
 ```
-(:Task) -[:USED]-> (:Tool)                                   every past task and the tools it called
+(:Task) -[:USED]-> (:Tool)                                   every past task and the tools that worked for it
+(:Task) -[:FAILED]-> (:Tool)                                 calls that errored (recorded, never vote)
+(:Catalog) -[:LISTS]-> (:Tool)                               the live tool catalog
 (:Term {df}) -[:LED]-> (:Link {n}) -[:TO]-> (:Tool {uses})   a word in past tasks → the tool that solved them
 (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)              tools used together in one task
 ```
 
+0. **Abstain or fall back:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits,
+   load nothing and say why; if no past task is close, use plain tool search; otherwise continue.
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
    weighted by similarity. `fused = cosine(task, tool) + 1.0 · votes`.
@@ -82,7 +146,8 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
    Limiting it to 8 words cut the rows read about 4× and slightly *raised* accuracy. This hop carries most of the
    multi-server gain (about +3 points).
 4. **Rank and pack:** `fused + 0.5 · words + 0.2 · co-use`, packed greedily into the token budget.
-5. **Learn:** after the task, write a `Task` node with its `USED` edges and update the word and co-use counts.
+5. **Learn:** after the task, write a `Task` node with `USED` (worked) and `FAILED` (errored) edges, and update the word
+   and co-use counts from the calls that worked. All reads are filtered to the tools the `Catalog` node currently lists.
 
 HydraDB specifics that shaped the design:
 - Batch writes can set node properties but not edge properties, so counts live on reified `Link` and `CoLink` nodes.
@@ -100,15 +165,22 @@ query nodes over the same object store, which we haven't done here.
 - **Synthetic questions, real execution.** Toucan's questions were generated by an LLM from each server's tool set, so
   similar tasks recur by construction, which favours any past-task memory (ours and the baseline's). Organic agent
   traffic may recur less. The tool calls and their results are real.
-- **Cold start.** Deja is level with tool search for roughly the first 400 tasks it sees (38.8% vs 36.8% on shuffle 1)
-  and pays off after that. A hosted version would start warm from memory shared across a team's agents.
-- **Tasks far from the catalog** still get confident-looking loadouts; nothing flags "no good tool exists".
+- **Cold start.** Deja is level with tool search for roughly the first 400 tasks it sees (38.8% vs 36.8% on shuffle 1).
+  The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
+  across a team's agents.
+- **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
+  "no fitting tool" labels come from held-out server clusters and an embedding-based substitute check, not from people.
+- **Failure detection is a text heuristic** on the recorded responses, hand-checked on a sample, not ground truth.
 
 ## What we measured and threw away
 
 - **Shared entity memory** ("reuse IDs other agents already resolved") was our first headline, with kill criteria set
   before building. It failed them: binding precision was 21%, and even a perfect binder would save only 6.3% of lookups
   beyond a plain `(tool, args)` cache.
+- **Graph signals for abstaining** (neighbour agreement, server spread, co-use coherence) added nothing over plain
+  similarity; the abstain rule doesn't use them.
+- **A reliability penalty** on top of learning from successes cut broken tools to 3% of loadouts but cost about 6 points.
+  Too blunt; dropped.
 - **Data-flow edges** (a value from one tool's output reappearing verbatim in a later tool's arguments) are real but rare.
   Removing them moves the result by 0.1 points, so they aren't part of the claim.
 - **Real tool chains are shallow:** only 2.8% of traces have 3 or more calls linked by data flow. One-hop traversals are
@@ -130,6 +202,10 @@ for i in 00000 00001; do curl -L -o data/raw/kimi_$i.parquet \
 uv run python retr.py 2000          # prequential eval, 4 orderings -> data/results_v2_2000.json
 uv run python hydra_store.py        # HydraDB loadouts == in-memory twin (asserts)
 uv run python load.py 16            # 16 concurrent planners + 1 learner writing
+uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
+uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
+uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
+uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
 uv run python make_readme.py        # regenerate this README's tables from the results

@@ -1,5 +1,6 @@
 """Regenerate README.md's result tables from the eval JSON, so the prose never drifts from the numbers."""
 import json, os
+import numpy as np
 R = json.load(open("data/results_v2_2000.json")); O = [R["orders"][k] for k in ("dataset", "1", "2", "3")]
 W = json.load(open("web/results.json")) if os.path.exists("web/results.json") else {}
 H, L = W.get("hydra", {}), W.get("load", {})
@@ -19,9 +20,43 @@ budget = "| token budget | " + " | ".join(f"{b:,}" for b in B) + " |\n|---|" + "
 o1 = R["orders"]["1"]; e = o1["curve_edges"]
 curve = "| tasks already served | " + " | ".join(f"{a:,}–{b:,}" for a, b in zip(e, e[1:])) + " |\n|---|" + "---|" * (len(e) - 1) + "\n" + "\n".join(
     f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search", "vector"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
-held = (f"**Held out, live from HydraDB:** on {H['n']} tasks the served graph never learned from: Deja {100*H['deja']:.1f}%, past-task memory alone "
-        f"{100*H['knn']:.1f}%, tool search {100*H['vector']:.1f}%. Graph reads per loadout p50 {H['latency_ms']['p50']:.0f} ms / p95 {H['latency_ms']['p95']:.0f} ms. "
-        f"Every served loadout is identical to the in-memory twin (`matches_oracle: {H['matches_oracle']}`).") if H else ""
+held = (f"**Held out, live from HydraDB:** on {H['n']} tasks the served graph never learned from (all answerable), every tool that worked was "
+        f"in the first loadout for **{100*H['deja']:.1f}%** vs tool search {100*H['vector']:.1f}%; loadouts carried a chronically broken tool "
+        f"{100*H['deja_broken']:.1f}% of the time vs {100*H['vector_broken']:.1f}% for tool search. The served policy answered with Deja on "
+        f"{H['modes']['deja']}, fell back to tool search on {H['modes']['fallback']} and abstained on {H['modes']['abstain']}. Graph reads per loadout "
+        f"p50 {H['latency_ms']['p50']:.0f} ms / p95 {H['latency_ms']['p95']:.0f} ms. Every served decision and loadout is identical to the "
+        f"in-memory twin (`matches_oracle: {H['matches_oracle']}`).") if H else ""
+OC = json.load(open("data/outcome.json")) if os.path.exists("data/outcome.json") else {}
+om = lambda m, k: 100 * float(np.mean([OC[x][m][k] for x in OC]))
+outcome = "\n".join([
+    "| | Every tool that worked loaded | Every called tool loaded | Loadout has a chronically broken tool |", "|---|---|---|---|"] +
+    [f"| {n} | {om(m, 'succeeded'):.1f}% | {om(m, 'called'):.1f}% | {om(m, 'broken_tool_loaded'):.1f}% |" for n, m in (
+        ("Tool search", "vector"), ("Past-task memory, learning from every call", "knn"), ("Deja, learning from every call", "deja"),
+        ("Past-task memory, successes only", "knn-ok"), ("**Deja, successes only (served)**", "deja-ok"),
+        ("Deja, successes only + reliability penalty (dropped)", "deja-ok+pen"))]) if OC else ""
+AB = json.load(open("data/abstain.json")) if os.path.exists("data/abstain.json") else {}
+def ab_table():
+    T = AB["policies"]["similarity only"]["tradeoff"]; G = AB["policies"]["similarity + graph"]["tradeoff"]
+    rows = ["| Allowed wrong abstentions (fit on seed 1) | No-fit tasks caught (seed 2 / 3) | Answerable wrongly abstained (seed 2 / 3) | Same, with graph signals added: caught |", "|---|---|---|---|"]
+    for fa in T:
+        f = lambda d, k: " / ".join(f"{100*d[fa][x][k]:.0f}%" for x in ("2", "3"))
+        rows.append(f"| {100*float(fa):.0f}%{' (served)' if abs(float(fa)-0.05) < 1e-9 else ''} | {f(T, 'abstain_recall_unanswerable')} | {f(T, 'false_abstain_answerable')} | {f(G, 'abstain_recall_unanswerable')} |")
+    au = AB["auroc"]; fe = ("s_mem", "s_tool", "vote_top", "vote_agree", "srv_spread", "co_coh")
+    lo_hi = lambda k: f"{min(au[x][k] for x in au):.2f}–{max(au[x][k] for x in au):.2f}"
+    F = AB["fallback"]["eval"]
+    return ("\n".join(rows), ", ".join(f"{n} {lo_hi(k)}" for n, k in zip(("closest past task", "best tool match", "top vote share", "neighbour agreement",
+            "server spread", "co-use coherence"), fe)), AB["setup"], AB["fallback"]["tau"],
+            f"{100*F['2']['deja']:.1f}% → {100*F['2']['deja+fallback']:.1f}% (seed 2), {100*F['3']['deja']:.1f}% → {100*F['3']['deja+fallback']:.1f}% (seed 3)")
+abt, auroc_s, absetup, abtau, fbs = ab_table() if AB else ("", "", {}, 0, "")
+LF = json.load(open("data/lifecycle.json")) if os.path.exists("data/lifecycle.json") else {}
+if LF:
+    sc, st = LF["scenario"], LF["stream"]; lm = lambda k, f: float(np.mean([st[x][k][f] for x in st]))
+    life = (f"**The removal test, on HydraDB:** learn a task that used tool A → remove A from the catalog → repeat the task. Over {sc['cases']} cases, "
+            f"A was never loaded again ({sc['A_never_loaded']}/{sc['cases']}) and the token budget was still packed ({sc['budget_still_packed']}/{sc['cases']}).\n\n"
+            f"**Removing 10% of tools mid-stream** (3 seeds, tasks still answerable afterwards): reading the live catalog keeps "
+            f"{100*lm('filtered','success'):.1f}% success, against {100*lm('stale','success'):.1f}% when trusting stale memory, which also spends "
+            f"{lm('stale','tokens_on_removed_tools'):.0f} tokens per loadout on tools that no longer exist. Tool search: {100*lm('vector','success'):.1f}%.")
+else: life = ""
 load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, word and co-use reads) from one single-node HydraDB while a learner "
         f"keeps writing new tasks: **{L['errors']} errors**, {L['qps']:.1f} loadouts/s, p50 {L['p50']:.0f} ms, p95 {L['p95']:.0f} ms, {L['writes']} tasks learned meanwhile. A single planner gets {L['single_reader_qps']:.1f}/s at p50 {L['single_reader_p50']:.0f} ms, so 16 planners give "
         f"{L['qps']/L['single_reader_qps']:.1f}× the throughput.") if L else ""
@@ -37,6 +72,10 @@ tool search over descriptions misses the tools a task *actually* ends up calling
 needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sharper with every task it serves.**
 
 ## Results
+
+**The served model learns only from tool calls that worked** (12–15% of recorded calls errored), abstains when nothing in
+the catalog fits, falls back to plain tool search when memory has nothing close, and reads the live tool catalog from the
+graph. Each of those is measured below. First, the core comparison, which learns from and scores *every called tool*:
 
 8,612 tasks run against real MCP servers (Toucan-1.5M: questions LLM-generated from each server's tools, tool calls
 really executed) · 2,236 tools across 367 servers · 2,000-token budget.
@@ -75,16 +114,62 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 
 {budget}
 
+### Learning only from calls that worked
+
+`(:Task)-[:USED]->(:Tool)` used to record that a tool was *called*, so a call that errored still earned votes. Toucan
+stores each executed call's response; a call counts as failed if its response opens with an error (HTTP 4xx/5xx,
+missing API key, crash, "unknown tool"). Hand-check: 40/40 sampled flags were real failures, and 28/30 unflagged
+responses were real successes (the two misses' patterns were then added). 21% of tasks contain a call that never
+succeeded. The served model writes the outcome as the edge type, `USED` for successes and `FAILED` for failures, and
+only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails in ≥ 80% of the ≥ 10 tasks that call it:
+
+{outcome}
+
+On the tools that worked it is as good or slightly better, and loadouts carrying a broken tool drop by more than half.
+It no longer loads tools whose calls failed, so the every-called-tool number falls; both are reported. The graph keeps
+its lead over the memory-only baseline built the same way.
+
+### Knowing when nothing fits
+
+Toucan has no "no suitable tool" tasks, so we built them. Cluster servers by tool embeddings (single-linkage at cosine
+0.85), hold out whole clusters plus every server within 0.80 of them (3 seeds, about 37 servers each), and call a task
+unanswerable only if all its servers were removed **and** no remaining tool resembles any tool it needed (tool-tool
+cosine < 0.80; hand-checked substitutes score 0.83–0.93, non-substitutes 0.52–0.78). Without that substitute check,
+about half the "unanswerable" weather tasks still had a working weather server left. Unanswerable tasks per seed:
+{", ".join(str(absetup[x]["n_un"]) for x in absetup) if absetup else ""}.
+
+How well each signal separates answerable from unanswerable tasks (AUROC, 3 seeds, warm memory): {auroc_s}.
+The abstain rule is a two-feature logistic regression (closest past task, best tool match) fit on seed 1 and tested on
+seeds 2 and 3:
+
+{abt}
+
+**The graph doesn't help here.** Adding the graph signals (vote share, neighbour agreement, server spread, co-use
+coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. Cold-start fallback
+(plain tool search when the closest past task is below {abtau:.2f}): {fbs}; it helps in the first few hundred tasks and is
+neutral after.
+
+### Tools come and go
+
+The catalog is graph state: `(:Catalog)-[:LISTS]->(:Tool)`. When a server drops a tool from `tools/list`, Deja deletes
+one edge; every read is filtered to the live catalog, whatever memory says.
+
+{life}
+
 ## How it works
 
 ![how it works](docs/img/4_how_it_works.png)
 
 ```
-(:Task) -[:USED]-> (:Tool)                                   every past task and the tools it called
+(:Task) -[:USED]-> (:Tool)                                   every past task and the tools that worked for it
+(:Task) -[:FAILED]-> (:Tool)                                 calls that errored (recorded, never vote)
+(:Catalog) -[:LISTS]-> (:Tool)                               the live tool catalog
 (:Term {{df}}) -[:LED]-> (:Link {{n}}) -[:TO]-> (:Tool {{uses}})   a word in past tasks → the tool that solved them
 (:Tool) -[:CO]-> (:CoLink {{n}}) -[:TO]-> (:Tool)              tools used together in one task
 ```
 
+0. **Abstain or fall back:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits,
+   load nothing and say why; if no past task is close, use plain tool search; otherwise continue.
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
    weighted by similarity. `fused = cosine(task, tool) + 1.0 · votes`.
@@ -94,7 +179,8 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
    Limiting it to 8 words cut the rows read about 4× and slightly *raised* accuracy. This hop carries most of the
    multi-server gain (about +3 points).
 4. **Rank and pack:** `fused + 0.5 · words + 0.2 · co-use`, packed greedily into the token budget.
-5. **Learn:** after the task, write a `Task` node with its `USED` edges and update the word and co-use counts.
+5. **Learn:** after the task, write a `Task` node with `USED` (worked) and `FAILED` (errored) edges, and update the word
+   and co-use counts from the calls that worked. All reads are filtered to the tools the `Catalog` node currently lists.
 
 HydraDB specifics that shaped the design:
 - Batch writes can set node properties but not edge properties, so counts live on reified `Link` and `CoLink` nodes.
@@ -112,15 +198,22 @@ query nodes over the same object store, which we haven't done here.
 - **Synthetic questions, real execution.** Toucan's questions were generated by an LLM from each server's tool set, so
   similar tasks recur by construction, which favours any past-task memory (ours and the baseline's). Organic agent
   traffic may recur less. The tool calls and their results are real.
-- **Cold start.** Deja is level with tool search for roughly the first 400 tasks it sees (38.8% vs 36.8% on shuffle 1)
-  and pays off after that. A hosted version would start warm from memory shared across a team's agents.
-- **Tasks far from the catalog** still get confident-looking loadouts; nothing flags "no good tool exists".
+- **Cold start.** Deja is level with tool search for roughly the first 400 tasks it sees (38.8% vs 36.8% on shuffle 1).
+  The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
+  across a team's agents.
+- **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
+  "no fitting tool" labels come from held-out server clusters and an embedding-based substitute check, not from people.
+- **Failure detection is a text heuristic** on the recorded responses, hand-checked on a sample, not ground truth.
 
 ## What we measured and threw away
 
 - **Shared entity memory** ("reuse IDs other agents already resolved") was our first headline, with kill criteria set
   before building. It failed them: binding precision was 21%, and even a perfect binder would save only 6.3% of lookups
   beyond a plain `(tool, args)` cache.
+- **Graph signals for abstaining** (neighbour agreement, server spread, co-use coherence) added nothing over plain
+  similarity; the abstain rule doesn't use them.
+- **A reliability penalty** on top of learning from successes cut broken tools to 3% of loadouts but cost about 6 points.
+  Too blunt; dropped.
 - **Data-flow edges** (a value from one tool's output reappearing verbatim in a later tool's arguments) are real but rare.
   Removing them moves the result by 0.1 points, so they aren't part of the claim.
 - **Real tool chains are shallow:** only 2.8% of traces have 3 or more calls linked by data flow. One-hop traversals are
@@ -142,6 +235,10 @@ for i in 00000 00001; do curl -L -o data/raw/kimi_$i.parquet \\
 uv run python retr.py 2000          # prequential eval, 4 orderings -> data/results_v2_2000.json
 uv run python hydra_store.py        # HydraDB loadouts == in-memory twin (asserts)
 uv run python load.py 16            # 16 concurrent planners + 1 learner writing
+uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
+uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
+uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
+uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
 uv run python make_readme.py        # regenerate this README's tables from the results

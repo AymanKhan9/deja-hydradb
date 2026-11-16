@@ -2,3 +2,4 @@ data/
 .venv/
 .hydradb/
 __pycache__/
+.vercel

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Deploy to a fresh Ubuntu VM (x86_64 or arm64, >= 4 GB RAM; live demo runs on an Oracle x86_64 VM):  ./deploy.sh ubuntu@<vm-ip>
-# The public link https://deja-hydradb.vercel.app is a rewrite proxy to the VM (vercel/vercel.json): if the VM IP
-# changes, edit that file and run `npx vercel deploy --prod` in vercel/.
+# The public link https://deja-hydradb.vercel.app is a rewrite proxy to the VM (vercel.json at the repo root; the Vercel
+# project deploys from GitHub on every push, so it must live at the root). If the VM IP changes, edit it and push.
 # Also open TCP 80 in the VCN security list (Oracle console) — this script handles the VM's own iptables.
 set -euo pipefail
 HOST="$1"; cd "$(dirname "$0")"
 rsync -az --delete --exclude .venv --exclude .hydradb --exclude __pycache__ --exclude data/raw --exclude '.git' \
-  --include 'data/' --include 'data/traces_slim.json' --include 'data/*.npy' --include 'data/results_v2_*.json' --include 'data/load.json' \
+  --include 'data/' --include 'data/traces_slim_ok.json' --include 'data/abstain.json' --include 'data/outcome.json' --include 'data/lifecycle.json' --include 'data/*.npy' --include 'data/results_v2_*.json' --include 'data/load.json' \
   --exclude 'data/*' ./ "$HOST":deja/
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
@@ -14,7 +14,7 @@ command -v docker >/dev/null || { curl -fsSL https://get.docker.com | sudo sh; s
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 cd ~/deja && uv sync -q
-sudo -E env "PATH=$PATH" BUCKET=deja-v2 ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
+sudo -E env "PATH=$PATH" BUCKET=deja-v3 ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
 sudo tee /etc/systemd/system/deja.service >/dev/null <<UNIT
 [Unit]
 Description=Deja server

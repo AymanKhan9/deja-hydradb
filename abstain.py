@@ -80,7 +80,9 @@ def fit(X, y, iters=3000, lr=0.5):
     mu, sd = X.mean(0), X.std(0) + 1e-9; Z = (X - mu) / sd; w = np.zeros(Z.shape[1]); b = 0.0
     for _ in range(iters):
         p = 1 / (1 + np.exp(-(Z @ w + b))); g = p - y; w -= lr * Z.T @ g / len(y); b -= lr * g.mean()
-    return lambda X2: 1 / (1 + np.exp(-(((X2 - mu) / sd) @ w + b))), dict(zip(range(len(w)), w.round(3)))
+    sc = lambda X2: 1 / (1 + np.exp(-(((X2 - mu) / sd) @ w + b)))
+    sc.params = {"mu": mu.tolist(), "sd": sd.tolist(), "w": w.tolist(), "b": float(b)}          # what the live server loads
+    return sc, dict(zip(range(len(w)), w.round(3)))
 
 def evaluate(res, scorer, feats, thr, mode):
     """mode 'deja' / 'knn' / 'vec': which loadout answerable tasks get when Deja does not abstain."""
@@ -106,7 +108,7 @@ if __name__ == "__main__":
     for label, feats in (("similarity only", SIM_ONLY), ("similarity + graph", FEATS)):
         R1 = runs[1]["rows"]; X1 = np.array([[r[f] for f in feats] for r in R1]); y1 = np.array([not r["un"] for r in R1], float)
         sc, w = fit(X1, y1); p1 = sc(X1); thr = float(np.quantile(p1[y1 == 1], 0.05))
-        out["policies"][label] = {"weights": {feats[k]: v for k, v in w.items()}, "threshold": thr,
+        out["policies"][label] = {"weights": {feats[k]: v for k, v in w.items()}, "threshold": thr, "feats": feats, "params": sc.params,
                                   "eval": {s: {m: evaluate(runs[s], sc, feats, thr, m) for m in ("deja", "knn", "vec")} for s in (2, 3)},
                                   "tradeoff": {str(fa): {s: evaluate(runs[s], sc, feats, float(np.quantile(p1[y1 == 1], fa)), "deja") for s in (2, 3)}
                                                for fa in (0.02, 0.05, 0.10, 0.20)}}

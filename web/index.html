@@ -23,7 +23,7 @@ svg text{fill:var(--mute);font:12px ui-sans-serif,system-ui}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}@media (max-width:760px){.two{grid-template-columns:1fr}.bars .row{grid-template-columns:120px 1fr 48px}}
 table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:7px 10px;border-bottom:1px solid var(--line);text-align:right}td:first-child,th:first-child{text-align:left}th{color:var(--mute);font-weight:500}
 .tool{display:flex;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:6px;font:12.5px ui-monospace,monospace;border:1px solid transparent;word-break:break-all}
-.tool.gold{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.tool.gold{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}.tool.fail{border-color:var(--bad)}.banner{border:1px solid var(--line);border-left:3px solid var(--deja);border-radius:8px;padding:10px 12px;margin:10px 0;font-size:14px}
 .why{color:var(--mute);font:11.5px ui-sans-serif,system-ui;margin:-2px 8px 6px}
 .status{font-weight:700}.status.ok{color:var(--ok)}.status.bad{color:var(--bad)}
 input,select,button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
@@ -39,7 +39,7 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <main>
 <div class="kicker">Deja · agent context layer · built on HydraDB</div>
 <h1>Your agent has 2,000 tools.<br><em>Load the ones it will actually call.</em></h1>
-<p class="sub">Deja remembers, in a HydraDB graph, which tools past tasks actually needed: each task and the tools it used, which words led to which tools, and which tools get used together. A new task pulls the tools its most similar past tasks used. Every task it serves makes the next loadout sharper.</p>
+<p class="sub">Deja remembers, in a HydraDB graph, which tools past tasks actually needed: each task and the tools it used, which words led to which tools, and which tools get used together. A new task pulls the tools its most similar past tasks used. Every task it serves makes the next loadout sharper. It learns only from tool calls that <b>worked</b>, says so when nothing in the catalog fits, and reads the live tool catalog from the graph, so a removed tool never comes back.</p>
 
 <div class="big" id="big"></div>
 
@@ -49,15 +49,27 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <svg id="curve" viewBox="0 0 1000 340" width="100%" role="img" aria-label="learning curve"></svg>
 
 <h2>What does the work</h2>
-<p class="sub"><b>Memory of past tasks does most of the lifting.</b> A plain vector store of past tasks (no graph: the 20 nearest past tasks vote for the tools they used) already beats tool search by a wide margin. Deja keeps that memory in the graph and adds two hops on top: about 2.5 points overall and 3 on tasks that span two servers, mostly from the word hop.</p>
+<p class="sub">This ablation learns from and scores <i>every called tool</i>. (The served model learns only from calls that worked; see the next section.) <b>Memory of past tasks does most of the lifting.</b> A plain vector store of past tasks (no graph: the 20 nearest past tasks vote for the tools they used) already beats tool search by a wide margin. Deja keeps that memory in the graph and adds two hops on top: about 2.5 points overall and 3 on tasks that span two servers, mostly from the word hop.</p>
 <div class="two">
  <div class="card bars"><div class="lbl" style="margin-bottom:8px">All 8,612 tasks</div><div id="bars-all"></div></div>
  <div class="card bars"><div class="lbl" style="margin-bottom:8px">Tasks that called tools on 2+ MCP servers (31%)</div><div id="bars-multi"></div></div>
 </div>
 <div class="card" style="margin-top:12px"><div class="lbl" style="margin-bottom:6px">Same comparison at other token budgets (shuffle 1)</div><table id="budgets"></table></div>
 
+<h2>Learns only from calls that worked</h2>
+<p class="sub">12–15% of recorded tool calls returned an error (HTTP 4xx/5xx, missing API keys, crashes), and 21% of tasks contain a call that never succeeded. Counting those as "the tool this task needed" teaches Deja to recommend broken tools. The served model records each call's outcome as the edge type, <code>(:Task)-[:USED]->(:Tool)</code> for successes and <code>(:Task)-[:FAILED]->(:Tool)</code> for failures, and only successes vote. Scored on the tools that <i>worked</i>, it's as good or slightly better, and loadouts carrying a chronically broken tool (fails in ≥ 80% of the ≥ 10 tasks that call it) drop by more than half. It no longer loads tools whose calls failed, so the "every called tool" number falls; both are shown. Mean of 3 shuffles.</p>
+<div class="card" style="margin-top:12px"><table id="outcome"></table></div>
+
+<h2>Knows when nothing fits</h2>
+<p class="sub">Toucan has no "no suitable tool" tasks, so we built them: hold out whole clusters of near-duplicate servers (3 seeds, ~37 servers each) and keep their tasks, but only where no remaining tool resembles any tool the task needed (a hand-checked substitute threshold). The abstain rule was fit on seed 1 and tested on seeds 2 and 3. Honest result: the signal is how close the nearest past task is. The graph signals we tried (vote agreement, server spread, co-use coherence) added nothing, so the rule uses similarity only.</p>
+<div class="card" style="margin-top:12px"><table id="abst"></table><p class="note" id="fbtxt" style="margin:8px 0 0"></p></div>
+
+<h2>Tools come and go</h2>
+<p class="sub">The catalog itself is graph state: <code>(:Catalog)-[:LISTS]->(:Tool)</code>. When a server drops a tool from <code>tools/list</code>, Deja deletes one edge and every read stops returning that tool, whatever memory says.</p>
+<div class="card" style="margin-top:12px"><p class="note" id="life" style="margin:0"></p></div>
+
 <h2>Try it</h2>
-<p class="sub">Pick one of 200 tasks Deja never learned from (green = a tool the agent really called), click an example, or type your own. Left: Deja's loadout from HydraDB. Right: plain tool search, same budget.</p>
+<p class="sub">Pick one of 200 tasks Deja never learned from (green = a tool that worked in the recorded run, red border = called but failed), click an example, or type your own. Left: Deja's loadout from HydraDB. Right: plain tool search, same budget.</p>
 <div class="card" style="margin-top:12px">
  <div class="ask"><select id="preset"><option value="">— 200 held-out tasks —</option></select>
   <input id="q" placeholder="describe a task, e.g. what time is it in Tokyo and what's the weather there"><button id="go">Get loadout</button></div>
@@ -68,12 +80,15 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 </div>
 
 <h2>How it works</h2>
-<pre>(:Task) -[:USED]-> (:Tool)                                    every past task and the tools it called
+<pre>(:Task) -[:USED]-> (:Tool)                                    every past task and the tools that worked for it
+(:Task) -[:FAILED]-> (:Tool)                                  calls that errored (recorded, never vote)
+(:Catalog) -[:LISTS]-> (:Tool)                                the live tool catalog
 (:Term {df}) -[:LED]-> (:Link {n}) -[:TO]-> (:Tool {uses})    a word in past tasks → the tool that solved them
 (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)               tools used together in one task</pre>
 <ul>
 <li><b>Query:</b> embed the task. (1) Find the 20 most similar past tasks by embedding, then read their <code>USED</code> edges from HydraDB: they vote for tools. (2) Take the top 5 of that fused ranking and walk <code>CO</code> edges to the tools they're usually used with (about +1 point). (3) Walk <code>LED</code> edges from the task's 8 rarest words (about +3 points on multi-server tasks). Rank, pack to the token budget.</li>
-<li><b>Learning:</b> after each task, a <code>Task</code> node and its <code>USED</code> edges are added, and the word and co-use counts update. This per-task write path is checked against the in-memory twin too.</li>
+<li><b>Abstain or fall back:</b> before ranking, a two-feature rule (closest past task, best tool match) decides: if nothing fits, load nothing and say why; if no past task is close, use plain tool search (this also covers the cold start); otherwise Deja.</li>
+<li><b>Learning:</b> after each task, a <code>Task</code> node with <code>USED</code> (worked) and <code>FAILED</code> (errored) edges is added, and the word and co-use counts update from the calls that worked. This per-task write path is checked against the in-memory twin too.</li>
 <li><b>Store:</b> counts live on reified Link nodes because HydraDB batch writes set node properties but not edge properties. The vote hop is an id-only batched read. Every loadout served here is checked identical to an in-memory twin on the 200 held-out tasks; the 8,612-task curves use that twin.</li>
 <li><b>Weights</b> (not tuned per ordering): vote weight 1.0 and K=20 come from one check on shuffle 1; term weight 0.5 and co-use weight 0.2 are unchanged from v1.</li>
 <li><b>Data:</b> Toucan-1.5M: real MCP servers, real executed tool calls. 8,612 unique prompts (one per prompt_id; only 36 duplicate question texts, 1.8% have an earlier task at cosine ≥ 0.95), 2,236 tools across 367 servers, pooled into one catalog.</li>
@@ -86,6 +101,8 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
 <ul>
 <li><b>Shared entity memory</b> ("reuse IDs other agents resolved") was our first headline. It failed its own kill test: binding precision 21%, and even a perfect binder saves only 6.3% of lookups beyond a plain (tool, args) cache.</li>
 <li><b>Synthetic questions, real execution:</b> Toucan's questions were LLM-generated from each server's tools, so similar tasks recur by construction. That favours any past-task memory, ours and the baseline's; organic traffic may recur less. Deja is also level with tool search for its first ~400 tasks and pays off after that.</li>
+<li><b>Graph signals for abstaining</b> (how strongly the neighbours agree, how many servers their votes span, whether the top tools are linked by co-use) added nothing over plain similarity, so the abstain rule doesn't use them.</li>
+<li><b>Penalising unreliable tools</b> on top of learning from successes cut broken tools to 3% of loadouts but cost 6 points; too blunt, dropped.</li>
 <li><b>Data-flow edges</b> (a value from one tool's output reappearing in another's arguments) are real but rare: removing them changes the result by 0.1 points, so they aren't part of the claim.</li>
 <li>Our first shipped model (word and co-use edges only, 52%) lost to the plain past-task memory baseline (65%) once a reviewer added that baseline. We rebuilt around it; the v1 row stays on the chart.</li>
 <li>Tool chains in real traces are shallow: only 2.8% have 3+ calls linked by data flow, so one-hop traversals are enough.</li>
@@ -100,10 +117,11 @@ const pct=x=>(100*x).toFixed(1)+"%";
 fetch("results.json").then(r=>r.json()).then(R=>{
  const os=["1","2","3"].map(k=>R.orders[k]);const avg=(m,f)=>os.reduce((a,o)=>a+f(o)[m],0)/os.length;
  const H=R.hydra||{};
+ const OC=R.outcome||{},os2=Object.keys(OC),om=(m,k)=>os2.reduce((a,s)=>a+OC[s][m][k],0)/os2.length;
  document.getElementById("big").innerHTML=[
-  [pct(avg("deja",o=>o.overall)),"vs "+pct(avg("vector",o=>o.overall)),"tasks with every needed tool in the first loadout (tool search)"],
-  [pct(avg("deja",o=>o.multi)),"vs "+pct(avg("vector",o=>o.multi)),"same, when the task calls tools on 2+ MCP servers"],
-  H.n?[pct(H.deja),"vs "+pct(H.vector),`on ${H.n} tasks never learned from, read live from HydraDB (past-task memory alone: ${pct(H.knn)})`]:null,
+  os2.length?[pct(om("deja-ok","succeeded")),"vs "+pct(om("vector","succeeded")),"tasks with every tool that worked already in the first loadout (vs tool search)"]:null,
+  os2.length?[pct(om("deja-ok","broken_tool_loaded")),"vs "+pct(om("deja","broken_tool_loaded")),"loadouts carrying a chronically broken tool (vs learning from every call)"]:null,
+  H.n?[pct(H.deja),"vs "+pct(H.vector),`on ${H.n} tasks never learned from, served live from HydraDB (tools that worked)`]:null,
   H.latency_ms?[H.latency_ms.p50.toFixed(0)+" ms","p95 "+H.latency_ms.p95.toFixed(0)+" ms","HydraDB graph reads per loadout"]:null
  ].filter(Boolean).map(([a,b,c])=>`<div class="card"><div class="num">${a} <small>${b}</small></div><div class="lbl">${c}</div></div>`).join("");
  // log-bucket curve
@@ -124,6 +142,13 @@ fetch("results.json").then(r=>r.json()).then(R=>{
  bars("bars-all",o=>o.overall);bars("bars-multi",o=>o.multi);
  const B=R.budgets||{};const bs=Object.keys(B).sort((a,b)=>a-b);
  if(bs.length)document.getElementById("budgets").innerHTML=`<tr><th>token budget</th>${bs.map(b=>`<th>${(+b).toLocaleString()}</th>`).join("")}</tr>`+["vector","knn","deja"].map(m=>`<tr><td>${NAME[m]}</td>${bs.map(b=>`<td>${pct(B[b][m])}</td>`).join("")}</tr>`).join("");
+ if(os2.length){const rows=[["vector","Tool search"],["knn","Past-task memory, every call"],["deja","Deja, learning from every call"],["knn-ok","Past-task memory, successes only"],["deja-ok","<b>Deja, successes only (served)</b>"]];
+  document.getElementById("outcome").innerHTML=`<tr><th></th><th>every tool that worked loaded</th><th>every called tool loaded</th><th>loadout has a chronically broken tool</th></tr>`+rows.map(([m,n])=>`<tr><td>${n}</td><td>${pct(om(m,"succeeded"))}</td><td>${pct(om(m,"called"))}</td><td>${pct(om(m,"broken_tool_loaded"))}</td></tr>`).join("")}
+ const AB=R.abstain;if(AB){const T=AB.policies["similarity only"].tradeoff;
+  document.getElementById("abst").innerHTML=`<tr><th>allowed wrong abstentions (fit on seed 1)</th><th>no-fit tasks caught, seed 2 / 3</th><th>answerable tasks wrongly abstained, seed 2 / 3</th></tr>`+Object.keys(T).map(fa=>`<tr><td>${Math.round(fa*100)}%${Math.abs(fa-0.05)<1e-9?" (served)":""}</td><td>${pct(T[fa]["2"].abstain_recall_unanswerable)} / ${pct(T[fa]["3"].abstain_recall_unanswerable)}</td><td>${pct(T[fa]["2"].false_abstain_answerable)} / ${pct(T[fa]["3"].false_abstain_answerable)}</td></tr>`).join("");
+  const F=AB.fallback.eval;document.getElementById("fbtxt").innerHTML=`Cold-start fallback (plain tool search when the closest past task is below ${AB.fallback.tau.toFixed(2)}): overall ${pct(F["2"].deja)} → ${pct(F["2"]["deja+fallback"])} (seed 2) and ${pct(F["3"].deja)} → ${pct(F["3"]["deja+fallback"])} (seed 3); it helps in the first few hundred tasks and is neutral after.`}
+ const LF=R.lifecycle;if(LF){const sc=LF.scenario,st=LF.stream,ks=Object.keys(st),m=(k,f)=>ks.reduce((a,s)=>a+st[s][k][f],0)/ks.length;
+  document.getElementById("life").innerHTML=`<b>The removal test</b> (on HydraDB): learn a task that used tool A → remove A from the catalog → repeat the task. A was never loaded again in <b>${sc.A_never_loaded} of ${sc.cases}</b> cases, and the token budget was still packed in ${sc.budget_still_packed} of ${sc.cases}. <b>Removing 10% of tools mid-stream</b> (3 seeds, tasks still answerable): reading the live catalog keeps ${pct(m("filtered","success"))} success, against ${pct(m("stale","success"))} when trusting stale memory, which also wastes ${m("stale","tokens_on_removed_tools").toFixed(0)} tokens per loadout on tools that no longer exist. Tool search: ${pct(m("vector","success"))}.`}
  const Ld=R.load; if(Ld)document.getElementById("loadtxt").innerHTML=`${Ld.readers} concurrent planners reading loadouts from one single-node HydraDB while a learner keeps writing new tasks: <b>${Ld.errors} errors</b>, ${Ld.qps.toFixed(1)} loadouts/s, p50 ${(Ld.p50/1000).toFixed(2)} s, p95 ${(Ld.p95/1000).toFixed(2)} s; ${Ld.writes} tasks learned meanwhile.${Ld.single_reader_qps?` One planner alone gets ${Ld.single_reader_qps.toFixed(1)}/s at p50 ${Ld.single_reader_p50.toFixed(0)} ms, so 16 give ${(Ld.qps/Ld.single_reader_qps).toFixed(1)}× the throughput.`:""} Correct under contention; throughput is the ceiling of one node. HydraDB scales reads by adding query nodes over the same object store, which we haven't done here.`;
  document.getElementById("foot").textContent=`${R.n_tasks.toLocaleString()} tasks · ${R.n_tools.toLocaleString()} tools · ${R.budget.toLocaleString()}-token budget${H.matches_oracle?" · HydraDB loadouts identical to the in-memory twin on all held-out tasks":""}`;
 });
@@ -134,15 +159,19 @@ fetch("api/presets").then(r=>r.json()).then(P=>{const s=document.getElementById(
   document.getElementById("chips").innerHTML=(P.examples||[]).map(e=>`<button class="chip" data-id="${e.id}">${e.label}</button>`).join("");
   document.querySelectorAll(".chip").forEach(b=>b.onclick=()=>fetch("api/loadout?id="+b.dataset.id).then(r=>r.json()).then(show))})
  .catch(()=>{note.textContent="Live backend is offline right now; the numbers above are the recorded results."});
-function col(title,list,gold){const g=new Set(gold||[]);const hit=gold?gold.every(t=>list.some(x=>x.name==t)):null;
+function col(title,list,gold,failed){const g=new Set(gold||[]),fl=new Set(failed||[]);const hit=gold?gold.every(t=>list.some(x=>x.name==t)):null;
  return `<div class="card"><div style="display:flex;justify-content:space-between;gap:8px"><b>${title}</b>${hit===null?"":`<span class="status ${hit?"ok":"bad"}">${hit?"all needed tools loaded":"missing a needed tool"}</span>`}</div>
  <div class="lbl" style="margin:4px 0 8px">${list.length} tools · ${list.reduce((a,x)=>a+x.tokens,0)} tokens</div>`+
  list.map(t=>{const w=[];if(t.why_knn&&t.why_knn.length)w.push("used by similar past task: “"+t.why_knn[0][0]+"…”");
   if(t.why_terms&&t.why_terms.length)w.push("word: "+t.why_terms.map(([a,n])=>`“${a}”×${n}`).join(", "));if(t.why_co)w.push(`used with ${t.why_co[0]} ×${t.why_co[1]}`);
-  return `<div class="tool ${g.has(t.name)?"gold":""}"><span>${t.name}</span><span class="lbl">${t.server.slice(0,22)}</span></div>`+(w.length?`<div class="why">${w.join(" · ")}</div>`:"")}).join("")+`</div>`}
+  if(t.broken)w.push("⚠ this tool fails in most recorded runs");
+  return `<div class="tool ${g.has(t.name)?"gold":fl.has(t.name)?"fail":""}"><span>${t.name}</span><span class="lbl">${t.server.slice(0,22)}</span></div>`+(w.length?`<div class="why">${w.join(" · ")}</div>`:"")}).join("")+`</div>`}
 function show(r){if(r.error){note.textContent="Error: "+r.error;return}
  note.textContent=`“${r.q.slice(0,200)}” · graph reads ${r.graph_ms} ms · ${r.memory.toLocaleString()} past tasks in memory · ${r.catalog.toLocaleString()}-tool catalog`;
- out.innerHTML=col("Deja (HydraDB)",r.deja,r.gold)+col("Tool search (vector)",r.vector,r.gold)}
+ const left=r.mode=="abstain"?`<div class="card"><b>Deja (HydraDB)</b><div class="banner" style="margin-top:10px">Loaded nothing. ${r.reason}</div></div>`:col(r.mode=="fallback"?"Deja → tool search (fallback)":"Deja (HydraDB)",r.deja,r.gold,r.failed);
+ out.innerHTML=left+col("Tool search (vector)",r.vector,r.gold,r.failed);
+ if(r.mode&&r.mode!="deja"){const d=document.createElement("div");d.className="banner";const h=document.createElement("b");
+  h.textContent=r.mode=="abstain"?"Deja abstains. ":"Cold-start fallback. ";d.append(h,r.reason);note.append(d)}}   // query text only via textContent
 document.getElementById("preset").onchange=e=>{if(e.target.value)fetch("api/loadout?id="+e.target.value).then(r=>r.json()).then(show)};
 const go=()=>{const q=document.getElementById("q").value.trim();if(q)fetch("api/loadout?q="+encodeURIComponent(q)).then(r=>r.json()).then(show)};
 document.getElementById("go").onclick=go;document.getElementById("q").onkeydown=e=>{if(e.key=="Enter")go()};

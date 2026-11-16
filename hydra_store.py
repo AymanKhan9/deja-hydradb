@@ -8,7 +8,7 @@ Counts sit on reified Link nodes because HydraDB's batch writes can set node pro
 Readers (agents) only query HydraDB. The single learner keeps an in-memory mirror of the counts so each write is one
 absolute-value batch instead of read-modify-write; the mirror is also the oracle the graph reads are checked against.
 """
-import hashlib, math, collections
+import hashlib, math, collections, sys
 from neo4j import GraphDatabase
 from retr import Learned, terms
 
@@ -47,7 +47,9 @@ class HydraLearned(Learned):
         db.nodes("Link", [{"id": hid("link", w + "\x1f" + g), "n": s.led[w][g]} for w, g in lk], ["n"])
         db.nodes("CoLink", [{"id": hid("co", a + "\x1f" + b), "n": s.co[a][b]} for a, b in co], ["n"])
         db.nodes("Meta", [{"id": META, "n_tasks": s.N}], ["n_tasks"])
-        db.edges("USED", [(hid("task", t["i"]), hid("tool", g)) for t in tasks for g in t["gold"]])
+        db.edges("USED", [(hid("task", t["i"]), hid("tool", g)) for t in tasks for g in s.view(t)["gold"]])
+        if s.OUTCOME:   # failures are recorded too (edge type = outcome); votes read USED only
+            db.edges("FAILED", [(hid("task", t["i"]), hid("tool", g)) for t in tasks for g in t.get("failed", ())])
         db.edges("LED", [(hid("term", w), hid("link", w + "\x1f" + g)) for w, g in lk])
         db.edges("TO", [(hid("link", w + "\x1f" + g), hid("tool", g)) for w, g in lk] + [(hid("co", a + "\x1f" + b), hid("tool", b)) for a, b in co])
         db.edges("CO", [(hid("tool", a), hid("co", a + "\x1f" + b)) for a, b in co])
@@ -56,8 +58,9 @@ class HydraLearned(Learned):
         links. A link that later drops out of a top K stays in the graph, and term_scores cuts it at read time."""
         super().ingest(task)
         lk = [(w, g) for w in terms(task["q"]) for g, _ in s.links(w)]
-        co = {(a, b) for a in task["gold"] for b in task["gold"] if a != b} | {tuple(f) for f in task["flows"]}
-        s._write([task], lk, co, set(task["gold"]) | {b for _, b in co})
+        v = s.view(task)
+        co = {(a, b) for a in v["gold"] for b in v["gold"] if a != b} | {tuple(f) for f in v["flows"]}
+        s._write([task], lk, co, set(v["gold"]) | {b for _, b in co})
     def bulk_load(s, tasks):
         """Boot path: learn from many tasks in memory, then write the whole graph in 1000-row batches (labels first)."""
         for t in tasks: Learned.ingest(s, t)
@@ -133,6 +136,7 @@ if __name__ == "__main__":
     cat, tasks = retr.build(); names = list(cat); nix = {n: k for k, n in enumerate(names)}
     TE, Q = retr.embed(None, "data/tool_emb.npy"), retr.embed(None, "data/q_emb.npy")
     Learned.Q = Q; HydraLearned.tool_names = {hid("tool", n): n for n in cat}
+    Learned.OUTCOME = "--all-calls" not in sys.argv          # check the served mode by default
     H = HydraLearned(); H.bulk_load(tasks[:300])
     for t in tasks[300:400]: H.ingest(t)                 # the per-task learning path, one write batch per task
     T = twin(H); bad = 0

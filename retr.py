@@ -45,6 +45,12 @@ class Learned:
     K, MIN_N = int(os.environ.get("DEJA_K", 10)), int(os.environ.get("DEJA_MIN_N", 2))
     TOPT, KNN = 8, 20          # query only the 8 highest-idf terms; vote with the 20 most similar past tasks
     Q = None                   # task embedding matrix, set by the caller
+    OUTCOME = False            # learn only from calls that succeeded (served model); False = every called tool (v2 eval)
+    def view(s, task):
+        """The task as the memory learns it: with OUTCOME, a tool whose calls all failed in this task teaches nothing."""
+        if not s.OUTCOME: return task
+        ok = task["gold_ok"]
+        return dict(task, gold=ok, flows=[f for f in task["flows"] if f[0] in ok and f[1] in ok])
     def links(s, w): return [(g, n) for g, n in sorted(s.led[w].items(), key=lambda x: (-x[1], x[0]))[:s.K] if n >= s.MIN_N]  # deterministic ties
     def __init__(s):
         s.led, s.tn, s.co, s.uses, s.df, s.N = collections.defaultdict(collections.Counter), collections.Counter(), collections.defaultdict(collections.Counter), collections.Counter(), collections.Counter(), 0
@@ -65,6 +71,7 @@ class Learned:
             for g in used.get(i, ()): out[g] += w / z
         return dict(out)
     def ingest(s, task):
+        task = s.view(task)
         s.past.append(task["i"]); s.pastgold[task["i"]] = sorted(task["gold"])
         ts = terms(task["q"]); s.N += 1
         for w in ts:
