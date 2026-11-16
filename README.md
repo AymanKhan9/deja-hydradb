@@ -226,6 +226,9 @@ Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was b
   across a team's agents.
 - **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
   "no fitting tool" labels come from held-out server clusters and an embedding-based substitute check, not from people.
+  It misses near-topic gaps: "List my open GitHub issues and group them by repository" (reported by a reader; the catalog
+  has no GitHub-issues tool) gets 16 GitHub-adjacent tools at confidence 0.89 (abstains below 0.82), because the closest
+  past task, about trending GitHub repositories, is 0.76 similar. The rule measures topic, not whether a tool can do the action.
 - **Failure detection is a text heuristic** on the recorded responses, hand-checked on a sample, not ground truth.
 
 ## What we measured and threw away
