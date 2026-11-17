@@ -6,7 +6,7 @@ abstains when nothing fits and falls back to plain tool search when memory has n
 import json, os, random, threading, time, http.server, urllib.parse
 import numpy as np
 import retr
-from hydra_store import HydraLearned, hid, twin, write_catalog, read_catalog
+from hydra_store import HydraLearned, hid, twin, write_catalog, read_catalog, catalog_version
 
 HOLDOUT, BUDGET, PORT = 200, 2000, int(os.environ.get("PORT", 8090))
 retr.Learned.OUTCOME = True
@@ -37,11 +37,13 @@ for t in tasks:
     for g in t["failed"]: fails[g] = fails.get(g, 0) + 1
 BROKEN = {g for g in calls if calls[g] >= 10 and fails.get(g, 0) / calls[g] >= 0.8}   # fail in >= 80% of >= 10 tasks
 
-_cat = {"t": 0.0, "set": None, "ix": None}
+_cat = {"v": "unread", "set": None, "ix": None}
 def catalog():
-    """Current catalog from HydraDB (one id-only read), cached for 5 s."""
-    if _cat["set"] is None or time.time() - _cat["t"] > 5:
-        s = read_catalog(L.db); _cat.update(t=time.time(), set=s, ix=np.array(sorted(ix[n] for n in s)))
+    """Current catalog from HydraDB. Each call reads the Catalog node's version (one small read); the tool list itself is
+    re-read only when the version changed, so a removed tool is never served after its removal returns."""
+    v = catalog_version(L.db)
+    if v != _cat["v"]:
+        s = read_catalog(L.db); _cat.update(v=v, set=s, ix=np.array(sorted(ix[n] for n in s)))
     return _cat["set"], _cat["ix"]
 
 from fastembed import TextEmbedding
@@ -133,7 +135,7 @@ if __name__ == "__main__":
     R = json.load(open(f"data/results_v2_{BUDGET}.json"))
     R["budgets"] = {b: json.load(open(f"data/results_v2_{b}.json"))["orders"]["1"]["overall"] for b in (1000, 2000, 4000)
                     if os.path.exists(f"data/results_v2_{b}.json")}
-    for k in ("outcome", "lifecycle", "load", "analysis_v5"):
+    for k in ("outcome", "lifecycle", "load", "analysis_v5", "catalog_check"):
         if os.path.exists(f"data/{k}.json"): R[k.split("_")[0]] = json.load(open(f"data/{k}.json"))
     R.get("lifecycle", {}).pop("scenario_cases", None)
     if os.path.exists("data/agent_check.json"): R["agent"] = {k: v for k, v in json.load(open("data/agent_check.json")).items() if k != "rows"}

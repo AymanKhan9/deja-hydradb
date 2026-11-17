@@ -33,6 +33,13 @@ _w = lambda m: (o1["curve"][m][0] * 50 + o1["curve"][m][1] * 50) / 100
 cold = f"{100*_w('deja'):.0f}% vs {100*_w('search'):.0f}%"
 curve = "| tasks already served | " + " | ".join(f"{a:,}–{b:,}" for a, b in zip(e, e[1:])) + " |\n|---|" + "---|" * (len(e) - 1) + "\n" + "\n".join(
     f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
+kk = lambda x: f"{x/1000:.1f}".removesuffix(".0") + "k" if x >= 1000 else str(x)
+gp = [(a, b, round(100 * (d - sv))) for a, b, d, sv in zip(e, e[1:], o1["curve"]["deja"], o1["curve"]["search"])]
+first = next(x for i, x in enumerate(gp) if all(y[2] > 0 for y in gp[i:]))
+gaptxt = ("**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool "
+          "search, shuffle 1: " + ", ".join(f"{kk(a)}–{kk(b)} tasks {g:+d}" for a, b, g in gp if a >= 100) +
+          f". Deja is below tool search for its first 100 tasks and ahead from the {kk(first[0])}–{kk(first[1])} bucket on "
+          "(v4 was ahead from 100–200; the ~400 figure in the launch article was v2).")
 held = (f"**Held out, live from HydraDB:** on {H['n']} tasks the served graph never learned from (all answerable), every tool that worked was "
         f"in the first loadout for **{100*H['deja']:.1f}%** vs tool search {100*H['vector']:.1f}%; loadouts carried a chronically broken tool "
         f"{100*H['deja_broken']:.1f}% of the time vs {100*H['vector_broken']:.1f}% for tool search. The served policy answered with Deja on "
@@ -110,6 +117,14 @@ if LF:
             f"{100*lm('filtered','success'):.1f}% success, against {100*lm('stale','success'):.1f}% when trusting stale memory, which also spends "
             f"{lm('stale','tokens_on_removed_tools'):.0f} tokens per loadout on tools that no longer exist. Tool search: {100*lm('vector','success'):.1f}%.")
 else: life = ""
+CC = json.load(open("data/catalog_check.json")) if os.path.exists("data/catalog_check.json") else {}
+if CC: life += (f"\n\n**The same test through the server's loadout path** (`catalog_check.py`, the function behind `/api/loadout`): "
+                f"{CC['cases']} tools removed while the server's catalog was warm were absent from both columns in "
+                f"{CC['absent_immediately']}/{CC['cases']} loadouts asked for right after the removal and {CC['absent_after_6s']}/{CC['cases']} "
+                f"six seconds later; re-added, {CC['back_in_catalog_after_readd']}/{CC['cases']} came back. A reader (@webmcpx) spotted that the "
+                "server cached the catalog for 5 s, so a removed tool could be served for up to 5 s after removal; this test failed "
+                "on that version (14 of 20 still loaded the removed tool). Now every catalog write gives the `Catalog` node a new "
+                "version, and the server re-reads the tool list whenever the version changes, whichever process made the change.")
 load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner "
         f"keeps writing new tasks: **{L['errors']} errors**, {L['qps']:.1f} loadouts/s, p50 {L['p50']:.0f} ms, p95 {L['p95']:.0f} ms, {L['writes']} tasks learned meanwhile. A single planner gets {L['single_reader_qps']:.1f}/s at p50 {L['single_reader_p50']:.0f} ms, so 16 planners give "
         f"{L['qps']/L['single_reader_qps']:.1f}× the throughput. The step-vote read costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners.") if L else ""
@@ -172,6 +187,8 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 ![learning curve](docs/img/3_learning_curve.png)
 
 {curve}
+
+{gaptxt} {f"{100*AN['miss_ranked_out']:.0f}% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling." if AN else ""}
 
 **Does the lead need near-duplicates?** Toucan's questions recur by construction, so here is accuracy by how similar the
 closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
@@ -244,7 +261,7 @@ signal, every Toucan task is answerable, so it ships in the evaluation and the m
 ### Tools come and go
 
 The catalog is graph state: `(:Catalog)-[:LISTS]->(:Tool)`. When a server drops a tool from `tools/list`, Deja deletes
-one edge; every read is filtered to the live catalog, whatever memory says.
+one edge and gives the `Catalog` node a new version; every read is filtered to the live catalog, whatever memory says.
 
 {life}
 
@@ -350,6 +367,7 @@ uv run python load.py 16            # 16 concurrent planners + 1 learner writing
 uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
 uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
 uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
+uv run python catalog_check.py      # tool removal through the server's loadout path -> data/catalog_check.json
 uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80

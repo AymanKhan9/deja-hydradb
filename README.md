@@ -33,7 +33,7 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 | Deja without co-use edges (ablation) | 71.9–72.7% | 50.2–51.2% |
 | *v4 for reference (before step recall and the length penalty)*: tool search / memory-only / Deja | 43.6% / 68.1–68.7% / 70.4–70.9% | 27.2% / 42.2–43.4% / 45.4–45.8% |
 
-**Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **81.4%** vs tool search 47.2%; loadouts carried a chronically broken tool 0.0% of the time vs 56.5% for tool search. The served policy answered with Deja on 198, fell back to tool search on 0 and abstained on 2. Graph reads per loadout p50 117 ms / p95 197 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
+**Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **81.4%** vs tool search 47.2%; loadouts carried a chronically broken tool 0.0% of the time vs 56.5% for tool search. The served policy answered with Deja on 198, fell back to tool search on 0 and abstained on 2. Graph reads per loadout p50 117 ms / p95 207 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
 
 **Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
 graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
@@ -73,6 +73,8 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 | Past-task memory, no graph | 42% | 28% | 53% | 54% | 62% | 65% | 71% | 75% | 78% |
 | Deja v1 | 38% | 30% | 45% | 42% | 49% | 50% | 51% | 54% | 55% |
 | Deja | 40% | 26% | 51% | 54% | 61% | 66% | 72% | 76% | 79% |
+
+**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool search, shuffle 1: 100–200 tasks -1, 200–400 tasks +11, 400–800 tasks +11, 800–1.6k tasks +21, 1.6k–3.2k tasks +27, 3.2k–6.4k tasks +30, 6.4k–8.6k tasks +32. Deja is below tool search for its first 100 tasks and ahead from the 200–400 bucket on (v4 was ahead from 100–200; the ~400 figure in the launch article was v2). 72% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling.
 
 **Does the lead need near-duplicates?** Toucan's questions recur by construction, so here is accuracy by how similar the
 closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
@@ -174,11 +176,13 @@ signal, every Toucan task is answerable, so it ships in the evaluation and the m
 ### Tools come and go
 
 The catalog is graph state: `(:Catalog)-[:LISTS]->(:Tool)`. When a server drops a tool from `tools/list`, Deja deletes
-one edge; every read is filtered to the live catalog, whatever memory says.
+one edge and gives the `Catalog` node a new version; every read is filtered to the live catalog, whatever memory says.
 
 **The removal test, on HydraDB:** learn a task that used tool A → remove A from the catalog → repeat the task. Over 40 cases, A was never loaded again (40/40) and the token budget was still packed (40/40).
 
 **Removing 10% of tools mid-stream** (3 seeds, tasks still answerable afterwards): reading the live catalog keeps 79.4% success, against 78.0% when trusting stale memory, which also spends 143 tokens per loadout on tools that no longer exist. Tool search: 40.6%.
+
+**The same test through the server's loadout path** (`catalog_check.py`, the function behind `/api/loadout`): 20 tools removed while the server's catalog was warm were absent from both columns in 20/20 loadouts asked for right after the removal and 20/20 six seconds later; re-added, 20/20 came back. A reader (@webmcpx) spotted that the server cached the catalog for 5 s, so a removed tool could be served for up to 5 s after removal; this test failed on that version (14 of 20 still loaded the removed tool). Now every catalog write gives the `Catalog` node a new version, and the server re-reads the tool list whenever the version changes, whichever process made the change.
 
 ## How it works
 
@@ -291,6 +295,7 @@ uv run python load.py 16            # 16 concurrent planners + 1 learner writing
 uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
 uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
 uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
+uv run python catalog_check.py      # tool removal through the server's loadout path -> data/catalog_check.json
 uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80

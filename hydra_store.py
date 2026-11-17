@@ -8,7 +8,7 @@ Counts sit on reified Link nodes because HydraDB's batch writes can set node pro
 Readers (agents) only query HydraDB. The single learner keeps an in-memory mirror of the counts so each write is one
 absolute-value batch instead of read-modify-write; the mirror is also the oracle the graph reads are checked against.
 """
-import hashlib, math, collections, sys
+import hashlib, math, collections, sys, uuid
 from neo4j import GraphDatabase
 from retr import Learned, terms
 
@@ -124,11 +124,19 @@ def write_catalog(db, tool_names):
     """The live catalog is graph state: (:Catalog)-[:LISTS]->(:Tool). Labels first, then edges."""
     db.nodes("Catalog", [{"id": CATALOG, "key": "catalog"}], ["key"])
     db.nodes("Tool", [{"id": hid("tool", n), "key": n} for n in tool_names], ["key"])
-    db.edges("LISTS", [(CATALOG, hid("tool", n)) for n in tool_names])
+    db.edges("LISTS", [(CATALOG, hid("tool", n)) for n in tool_names]); bump_catalog(db)
 
 def remove_tool(db, name):
     """tools/list changed: the tool leaves the catalog. Its USED/CO/LED history stays; reads just stop returning it."""
-    db.q("MATCH (c {id: $c})-[r:LISTS]->(t {id: $t}) DELETE r", c=CATALOG, t=hid("tool", name))
+    db.q("MATCH (c {id: $c})-[r:LISTS]->(t {id: $t}) DELETE r", c=CATALOG, t=hid("tool", name)); bump_catalog(db)
+
+def bump_catalog(db):
+    """Every catalog write ends by giving the Catalog node a new version, so readers that cache the catalog (server.py)
+    know to re-read it, whichever process made the change."""
+    db.nodes("Catalog", [{"id": CATALOG, "key": "catalog", "version": uuid.uuid4().hex}], ["key", "version"])
+
+def catalog_version(db):
+    return (db.q("MATCH (c:Catalog {id: $id}) RETURN c.version AS v", id=CATALOG) or [{"v": None}])[0]["v"]
 
 def read_catalog(db):
     """Current catalog, one id-only batched read."""
