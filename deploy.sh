@@ -14,7 +14,7 @@ command -v docker >/dev/null || { curl -fsSL https://get.docker.com | sudo sh; s
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 cd ~/deja && uv sync -q
-sudo -E env "PATH=$PATH" BUCKET=deja-v6 ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
+sudo -E env "PATH=$PATH" BUCKET=deja-v7 ./hydra.sh   # sudo: fresh docker group membership needs a re-login otherwise
 sudo tee /etc/systemd/system/deja.service >/dev/null <<UNIT
 [Unit]
 Description=Deja server
