@@ -345,6 +345,10 @@ query nodes over the same object store, which we haven't done here.
   beyond a plain `(tool, args)` cache.
 - **Graph signals for abstaining** (neighbour agreement, server spread, co-use coherence) added nothing over plain
   similarity; the abstain rule doesn't use them.
+- **A cross-encoder "can a tool do this?" check for abstaining** (local MiniLM, Jina and bge rerankers, task vs the top
+  8 tools). On the GitHub-issues query, which no tool can do, all three scored *higher* than 60–100% of answerable tasks:
+  they judge topic relevance, like the similarity rule. They were also too slow on CPU (2–19 pairs/s). Dropped before
+  the full benchmark; a model yes/no on the loadout is the next thing to try.
 - **A reliability penalty** on top of learning from successes cut broken tools to 3% of loadouts but cost about 6 points.
   Too blunt; dropped.
 - **Data-flow edges** (a value from one tool's output reappearing verbatim in a later tool's arguments) are real but rare.
