@@ -33,6 +33,8 @@ ts = [threading.Thread(target=reader, args=(k,)) for k in range(READERS)] + [thr
 l = np.array(lat) * 1000
 print(f"{READERS} planners + 1 learner, {SECONDS}s: {len(l)} loadouts ({len(l)/SECONDS:.1f}/s), p50 {np.percentile(l,50):.0f}ms "
       f"p95 {np.percentile(l,95):.0f}ms p99 {np.percentile(l,99):.0f}ms, errors {len(errs)} {set(errs)}, learner wrote {writes[0]} tasks meanwhile")
-json.dump({"readers": READERS, "seconds": SECONDS, "reads": len(l), "qps": len(l) / SECONDS, "p50": float(np.percentile(l, 50)),
-           "p95": float(np.percentile(l, 95)), "p99": float(np.percentile(l, 99)), "errors": len(errs), "writes": writes[0]},
-          open("data/load.json", "w"))
+if READERS == 1:     # the single-planner baseline is merged into the main (multi-planner) result
+    R = json.load(open("data/load.json")); R.update(single_reader_qps=len(l) / SECONDS, single_reader_p50=float(np.percentile(l, 50)))
+else: R = {"readers": READERS, "seconds": SECONDS, "reads": len(l), "qps": len(l) / SECONDS, "p50": float(np.percentile(l, 50)),
+           "p95": float(np.percentile(l, 95)), "p99": float(np.percentile(l, 99)), "errors": len(errs), "writes": writes[0]}
+json.dump(R, open("data/load.json", "w"))

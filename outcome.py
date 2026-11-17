@@ -41,11 +41,9 @@ def run(seed):
     for pos, i in enumerate(idx):
         t = tasks[i]; q = Q[i]; sim = TE @ q; V = [names[k] for k in np.argsort(-sim, kind="stable")[:400]]
         r = {"pos": pos, "multi": len(t["gold_servers"]) > 1, "has_ok": bool(t["gold_ok"]), "had_failure": bool(t["failed"])}
-        bb = retr.base_scores(t["q"], sim)
-        variants = {"vector": V, "search": rank(set(V[:200]), lambda n: bb[nix[n]])}     # search = hybrid tool search
+        variants = {"vector": V, "search": retr.search_rank(t["q"], sim, V, nix)}     # search = hybrid tool search
         for tag, St in (("", L), ("-ok", LO)):
-            kn = St.knn_scores(q)
-            variants["knn" + tag] = rank(set(V[:200]) | set(kn), lambda n: bb[nix[n]] + retr.LAM * kn.get(n, 0))
+            variants["knn" + tag] = retr.memory_rank(St, t["q"], q, sim, V, nix)
             variants["deja" + tag] = deja_rank(St, t["q"], q, sim, V, nix)[0]
         qset = LO.quarantined(); act = set(names) - qset                      # quarantine: never scored while held
         variants["deja-ok+quar"] = deja_rank(LO, t["q"], q, sim, [n for n in V if n in act], nix, active=act)[0]

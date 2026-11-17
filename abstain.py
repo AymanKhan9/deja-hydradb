@@ -75,10 +75,9 @@ def stream(seed):
              "co_coh": np.mean([L.co[a][b] > 0 for a, b in pairs]) if pairs else 0.0,
              "s_un": s_un, "un_frac": un_frac, "s_un_x": s_un_x, "un_frac_x": un_frac_x, "seen_un": len(pu)}
         if not r["un"]:
-            bb = retr.base_scores(t["q"], sim)          # tool search = Deja's hybrid base alone (the fallback uses it too)
-            r["deja_ok"] = t["gold"] <= set(pack(ranked, cat, BUDGET))
-            r["vec_ok"] = t["gold"] <= set(pack(rank(set(V[:200]), lambda n: bb[nix[n]]), cat, BUDGET))
-            kr = rank(set(V[:200]) | set(kn), lambda n: bb[nix[n]] + retr.LAM * kn.get(n, 0))
+            r["deja_ok"] = t["gold"] <= set(pack(ranked, cat, BUDGET))   # tool search = Deja's hybrid base alone (the fallback uses it too)
+            r["vec_ok"] = t["gold"] <= set(pack(retr.search_rank(t["q"], sim, V, nix), cat, BUDGET))
+            kr = retr.memory_rank(L, t["q"], q, sim, V, nix, active=active)
             r["knn_ok"] = t["gold"] <= set(pack(kr, cat, BUDGET))
             L.ingest(t)
         else: pu.append(t["i"])      # needs a signal that the task went unserved (agent called nothing / user said so)

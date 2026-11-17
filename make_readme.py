@@ -11,11 +11,20 @@ rows = [("Tool search: vector (bge-small) over tool descriptions", "vector"), ("
         ("Tool search: hybrid, reciprocal-rank fusion of vector + BM25", "hybrid"),
         ("**Tool search: Deja's base alone** (cosine + 0.15 · BM25)", "search"), ("Load whole servers, vector-ranked", "servers"),
         ("Vector + learned popularity (non-graph learner)", "popularity"),
-        ("**Past-task memory, no graph** (same base; 20 nearest past tasks vote for their tools)", "knn"),
+        ("**Past-task memory, no graph** (same base; the 20 nearest past tasks to the task and to each of its steps vote)", "knn"),
         ("Deja v1, first shipped: word + co-use edges, no task memory", "deja-v1"),
-        ("**Deja**: hybrid base + task memory in HydraDB + co-use hop + word hop", "deja"),
+        ("**Deja**: hybrid base + task and step memory in HydraDB + co-use hop + word hop", "deja"),
         ("Deja without word edges (ablation)", "deja-no-terms"), ("Deja without co-use edges (ablation)", "deja-no-couse")]
 main = "\n".join(f"| {n} | {rng(m, 'overall')} | {rng(m, 'multi')} |" for n, m in rows)
+O4 = [json.load(open("data/results_v4_2000.json"))["orders"][k] for k in ("dataset", "1", "2", "3")] if os.path.exists("data/results_v4_2000.json") else []
+r4 = lambda m, part: (lambda a, b: a if a == b else f"{a[:-1]}–{b}")(*(f"{100*x:.1f}%" for x in (min(o[part][m] for o in O4), max(o[part][m] for o in O4))))
+v4line = (f"| *v4 for reference (before step recall and the length penalty)*: tool search / memory-only / Deja | "
+          f"{r4('search','overall')} / {r4('knn','overall')} / {r4('deja','overall')} | {r4('search','multi')} / {r4('knn','multi')} / {r4('deja','multi')} |") if O4 else ""
+main += "\n" + v4line
+SB = O[1].get("by_similarity", {})
+simtab = ("| Closest past task similarity | Tasks (shuffle 1) | Tool search | Memory-only | Deja | Deja's lead over tool search |\n|---|---|---|---|---|---|\n" + "\n".join(
+    f"| {k} | {v['n']:,} | {100*v['search']:.1f}% | {100*v['knn']:.1f}% | {100*v['deja']:.1f}% | +{100*(v['deja']-v['search']):.1f} |"
+    for k, v in SB.items() if v["n"])) if SB else ""
 B = {b: json.load(open(f"data/results_v2_{b}.json"))["orders"]["1"]["overall"] for b in (1000, 2000, 4000) if os.path.exists(f"data/results_v2_{b}.json")}
 budget = "| token budget | " + " | ".join(f"{b:,}" for b in B) + " |\n|---|" + "---|" * len(B) + "\n" + "\n".join(
     f"| {n} | " + " | ".join(f"{100*B[b][m]:.1f}%" for b in B) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja", "deja")))
@@ -40,7 +49,7 @@ outcome = "\n".join([
         ("**Deja, successes only + quarantine (served)**", "deja-ok+quar"),
         ("Deja, successes only + reliability penalty (dropped)", "deja-ok+pen")) if m in OC[next(iter(OC))]]) if OC else ""
 gain = lambda part: f"{100*np.mean([o[part]['deja'] - o[part]['knn'] for o in O]):.1f}"
-AN = json.load(open("data/analysis_v4.json")) if os.path.exists("data/analysis_v4.json") else {}
+AN = json.load(open("data/analysis_v5.json")) if os.path.exists("data/analysis_v5.json") else {}
 ci = (f"Paired over shuffle 1, Deja minus memory-only is **+{100*AN['diff']:.2f} points (95% bootstrap CI {100*AN['ci95'][0]:+.2f} to "
       f"{100*AN['ci95'][1]:+.2f})**, and +{100*AN['diff_multi']:.2f} on multi-server tasks ({100*AN['ci95_multi'][0]:+.2f} to {100*AN['ci95_multi'][1]:+.2f}); "
       f"Deja alone gets {AN['deja_only_wins']} tasks right that memory-only misses, against {AN['memory_only_wins']} the other way.") if AN else ""
@@ -63,7 +72,8 @@ if AG:
              f"Paired: **+{100*pr['diff_worked']:.1f} points (95% bootstrap CI +{100*pr['ci95'][0]:.1f} to +{100*pr['ci95'][1]:.1f})**; Deja's "
              f"loadout was better on {pr['deja_only']} tasks and worse on {pr['search_only']}, at the same prompt size. "
              f"{a_['errors'] + s_['errors']} of {2*AG['n_tasks']} requests failed on the provider's credit limit and count as misses for both. "
-             f"One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success.")
+             f"One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success. "
+             f"This check ran on the v4 loadouts, before step recall and the length penalty; it hasn't been re-run on v5.")
 else: agent = ""
 KEY = "abstain_recall_unanswerable"
 def un_table():
@@ -100,9 +110,9 @@ if LF:
             f"{100*lm('filtered','success'):.1f}% success, against {100*lm('stale','success'):.1f}% when trusting stale memory, which also spends "
             f"{lm('stale','tokens_on_removed_tools'):.0f} tokens per loadout on tools that no longer exist. Tool search: {100*lm('vector','success'):.1f}%.")
 else: life = ""
-load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, word and co-use reads) from one single-node HydraDB while a learner "
+load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner "
         f"keeps writing new tasks: **{L['errors']} errors**, {L['qps']:.1f} loadouts/s, p50 {L['p50']:.0f} ms, p95 {L['p95']:.0f} ms, {L['writes']} tasks learned meanwhile. A single planner gets {L['single_reader_qps']:.1f}/s at p50 {L['single_reader_p50']:.0f} ms, so 16 planners give "
-        f"{L['qps']/L['single_reader_qps']:.1f}× the throughput.") if L else ""
+        f"{L['qps']/L['single_reader_qps']:.1f}× the throughput. The step-vote read costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners.") if L else ""
 
 readme = f"""# Deja: learned tool loadouts for agents, on HydraDB
 
@@ -141,7 +151,13 @@ served". Ranges cover 4 orderings (dataset order and 3 shuffles). One row per To
 question texts are exact duplicates, and 1.8% of tasks have an earlier task at cosine ≥ 0.95. Weights are not tuned per
 ordering. Model choices were made on shuffle 1 only: K=20 neighbours; votes weighted by similarity⁸ (tried 1 and 8); the
 base adds 0.15 · BM25 to cosine (tried 0.05, 0.15, 0.25, 0.35). Word weight 0.5 and co-use weight 0.2 are unchanged from
-v1. The memory-only baseline gets the same base and vote weighting, so the graph's gain is measured like for like.
+v1. **v5 (from a reviewer's analysis, reproduced here):** each step of a multi-step task ("…, then …", sentence ends) also
+recalls its own 20 nearest past tasks, which vote the same way, and a tool keeps its best step vote (weight 0.5, tried
+0.25–1.0); and every ranked method subtracts 0.05 · ln(tokens) so a long schema has to earn its space (tried 0.02–0.2).
+We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **The memory-only baseline
+and tool search get the same changes** (step votes for memory-only, the length penalty for both), so the graph's gain is
+measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
+than in v4.
 
 {ci}
 
@@ -156,6 +172,12 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 ![learning curve](docs/img/3_learning_curve.png)
 
 {curve}
+
+**Does the lead need near-duplicates?** Toucan's questions recur by construction, so here is accuracy by how similar the
+closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
+about trending GitHub repositories are 0.76 similar.
+
+{simtab}
 
 **Other token budgets** (shuffle 1):
 
@@ -173,6 +195,9 @@ only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails i
 {outcome}
 
 On the tools that worked it is as good or slightly better, and loadouts carrying a broken tool drop by more than half.
+The v5 length penalty packs more, shorter tools into the same budget (tool search: 18 tools per loadout instead of 14), so
+every method without quarantine carries a broken tool more often than in v4 (tool search 35% → 50%); with quarantine Deja
+goes from 7.2% to 8.5%.
 
 **Quarantine (served).** The `FAILED` edges are read, too: a tool goes into quarantine when at least 4 of its last 5
 recorded outcomes failed, stored as `(:Quarantine)-[:HOLDS]->(:Tool)` and kept in step by the learner. A held tool is
@@ -240,13 +265,14 @@ one edge; every read is filtered to the live catalog, whatever memory says.
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
    weighted by similarity. `fused = base + 1.0 · votes`, where `base = cosine + 0.15 · BM25/max(BM25)` and each neighbour's vote is
-   weighted by similarity⁸ (near neighbours dominate).
+   weighted by similarity⁸ (near neighbours dominate). **Steps** of a multi-step task do the same on their own (one more
+   batched `USED` read for all steps); a tool keeps its best step vote.
 2. **Co-use hop:** from the top 5 of the fused ranking, walk `CO` → `CoLink` → `Tool` to the tools those are
    usually used with (about +1 point overall).
 3. **Word hop:** from the task's 8 rarest words (highest idf), walk `LED` → `Link` → `Tool`, weighted by learned counts.
    Limiting it to 8 words cut the rows read about 4× and slightly *raised* accuracy. This hop carries most of the
    multi-server gain (about +3 points).
-4. **Rank and pack:** `fused + 0.5 · words + 0.2 · co-use`, packed greedily into the token budget.
+4. **Rank and pack:** `fused + 0.5 · words + 0.2 · co-use + 0.5 · step votes − 0.05 · ln(tokens)`, packed greedily into the token budget.
 5. **Learn:** after the task, write a `Task` node with `USED` (worked) and `FAILED` (errored) edges, and update the word
    and co-use counts from the calls that worked. All reads are filtered to the tools the `Catalog` node currently lists.
 
@@ -275,9 +301,13 @@ query nodes over the same object store, which we haven't done here.
 
 - **Synthetic questions, real execution.** Toucan's questions were generated by an LLM from each server's tool set, so
   similar tasks recur by construction, which favours any past-task memory (ours and the baseline's). Organic agent
-  traffic may recur less. The tool calls and their results are real.
-- **Cold start.** Over its first 100 tasks Deja is level with or slightly below its own hybrid base used as plain tool
-  search ({cold}, shuffle 1); after that memory pays off.
+  traffic may recur less. The similarity table above shows how much that matters: the lead over tool search is 20–30
+  points in every band, including tasks whose closest past task is only loosely related (below 0.7 there are only 60
+  tasks, so that row is noisy). Organic traffic would sit lower in the table. The tool calls and their results are real.
+- **Step recall fits how these questions were written.** 98% of Toucan tasks split into steps because an LLM wrote them as
+  multi-step requests; real prompts will split less often, and gain less from it.
+- **Cold start.** Over its first 100 tasks Deja is below its own hybrid base used as plain tool search ({cold}, shuffle 1;
+  worse than v4's 37% vs 41%); after that memory pays off.
   The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
   across a team's agents.
 - **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
