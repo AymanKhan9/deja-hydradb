@@ -2,7 +2,7 @@
 The last HOLDOUT tasks of the shuffled stream are never learned from; they are the page's presets.
 
 Served model: learns only from tool calls that worked; reads the tool catalog from the graph ((:Catalog)-[:LISTS]->(:Tool));
-abstains when nothing fits and falls back to plain tool search when memory has nothing close (policy fit by abstain.py)."""
+abstains when nothing fits (policy fit by abstain.py). The cold start is handled by retr's memory ramp, not a fallback."""
 import json, os, random, threading, time, http.server, urllib.parse
 import numpy as np
 import retr
@@ -26,7 +26,7 @@ print(f"graph loaded: {nt} task nodes, {nl} term links, {nc} co-use links, {len(
 presets = [{"id": i, "q": tasks[i]["q"], "multi": len(tasks[i]["gold_servers"]) > 1} for i in held]; EXAMPLES = []
 
 AB = json.load(open("data/abstain.json")); POL = AB["policies"]["similarity only"]; PRM = POL["params"]
-THR, TAU = POL["threshold"], AB["fallback"]["tau"]
+THR = POL["threshold"]
 def confidence(s_mem, s_tool):
     z = (np.array([s_mem, s_tool]) - np.array(PRM["mu"])) / np.array(PRM["sd"])
     return float(1 / (1 + np.exp(-(z @ np.array(PRM["w"]) + PRM["b"]))))
@@ -60,9 +60,8 @@ def _loadout(q, qvec, budget, store=None):
     if held: active = active - held; aix = np.array([k for k in aix if names[k] in active])
     sim = TE @ qvec; V = [names[aix[k]] for k in np.argsort(-sim[aix], kind="stable")[:400]]
     nb = st.neighbours(qvec); s_mem = nb[0][1] if nb else 0.0; s_tool = float(sim[aix].max()); conf = confidence(s_mem, s_tool)
-    mode = "abstain" if conf < THR else "fallback" if s_mem < TAU else "deja"
-    if mode == "deja": ranked, parts = retr.deja_rank(st, q, qvec, sim, V, ix, active=active)
-    else: ranked, parts = retr.search_rank(q, sim, V, ix), {"knn": {}, "terms": {}, "co": {}, "clause": {}}
+    mode = "abstain" if conf < THR else "deja"
+    ranked, parts = retr.deja_rank(st, q, qvec, sim, V, ix, active=active) if mode == "deja" else ([], {"knn": {}, "terms": {}, "co": {}, "clause": {}})
     graph_ms = (time.perf_counter() - t) * 1000
     picked = [] if mode == "abstain" else retr.pack(ranked, cat, budget)                                   # comparison column: hybrid tool search
     Vall = [names[aix_all[k]] for k in np.argsort(-sim[aix_all], kind="stable")[:400]]                   # over the full live catalog
@@ -70,14 +69,14 @@ def _loadout(q, qvec, budget, store=None):
     nbd = dict(nb); why_k = {}
     if mode == "deja":
         for i, used in getattr(L, "last_votes", {}).items():
-            for g in used: why_k.setdefault(g, []).append([tasks[i]["q"][:90], round(nbd.get(i, 0), 2)])
+            for g in used * (i in nbd):                      # whole-task neighbours only (the read also covers the steps)
+                why_k.setdefault(g, []).append([tasks[i]["q"][:90], round(nbd.get(i, 0), 2)])
     why_t, why_c = {}, {}
     if mode == "deja":
         for r in getattr(L, "last_term_rows", []): why_t.setdefault(r["tool"], []).append([r["term"], r["n"]])
         why_c = {r["b"]: [r["a"], r["n"]] for r in getattr(L, "last_co_rows", [])}
     reason = {"abstain": f"Nothing in the catalog looks like it fits: the closest past task is {s_mem:.2f} similar and the best tool {s_tool:.2f}. "
                          "Deja loads nothing and would ask the user instead of guessing.",
-              "fallback": f"No past task is close enough to trust (closest {s_mem:.2f} < {TAU:.2f}), so Deja falls back to plain tool search.",
               "deja": ""}[mode]
     return {"mode": mode, "reason": reason, "confidence": round(conf, 3), "s_mem": round(s_mem, 3), "s_tool": round(s_tool, 3),
             "deja": [tool(n, sim=round(float(sim[ix[n]]), 3), knn=round(parts["knn"].get(n, 0), 3), term=round(parts["terms"].get(n, 0), 3),
@@ -114,7 +113,7 @@ def holdout_check():
     """The 200 never-learned tasks (all answerable), read through HydraDB and checked against the in-memory twin.
     Success = every tool that WORKED in the recorded run is in the loadout (abstaining counts as a miss)."""
     T = twin(L); n = len(held); same = 0; lat = []; wins = []; c = {"deja": 0, "vector": 0, "deja_called": 0, "deja_broken": 0, "vector_broken": 0}
-    modes = {"deja": 0, "fallback": 0, "abstain": 0}; scored = 0
+    modes = {"deja": 0, "abstain": 0}; scored = 0
     for i in held:
         t = tasks[i]; r = _loadout(t["q"], Q[i], BUDGET); lat.append(r["graph_ms"]); modes[r["mode"]] += 1
         lo, lv = {x["name"] for x in r["deja"]}, {x["name"] for x in r["vector"]}
@@ -139,7 +138,7 @@ if __name__ == "__main__":
         if os.path.exists(f"data/{k}.json"): R[k.split("_")[0]] = json.load(open(f"data/{k}.json"))
     R.get("lifecycle", {}).pop("scenario_cases", None)
     if os.path.exists("data/agent_check.json"): R["agent"] = {k: v for k, v in json.load(open("data/agent_check.json")).items() if k != "rows"}
-    R["abstain"] = {k: v for k, v in AB.items() if k != "setup"} | {"setup": AB["setup"], "served_threshold": THR, "fallback_tau": TAU}
+    R["abstain"] = {k: v for k, v in AB.items() if k != "setup"} | {"setup": AB["setup"], "served_threshold": THR}
     R["hydra"] = holdout_check()
     json.dump(R, open("web/results.json", "w"))
     print(f"serving on :{PORT}", flush=True)

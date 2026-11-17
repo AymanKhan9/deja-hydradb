@@ -31,6 +31,7 @@ budget = "| token budget | " + " | ".join(f"{b:,}" for b in B) + " |\n|---|" + "
 o1 = R["orders"]["1"]; e = o1["curve_edges"]
 _w = lambda m: (o1["curve"][m][0] * 50 + o1["curve"][m][1] * 50) / 100
 cold = f"{100*_w('deja'):.0f}% vs {100*_w('search'):.0f}%"
+cold_rel = "above" if _w('deja') - _w('search') > 0.02 else "below" if _w('search') - _w('deja') > 0.02 else "level with"
 curve = "| tasks already served | " + " | ".join(f"{a:,}–{b:,}" for a, b in zip(e, e[1:])) + " |\n|---|" + "---|" * (len(e) - 1) + "\n" + "\n".join(
     f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
 kk = lambda x: f"{x/1000:.1f}".removesuffix(".0") + "k" if x >= 1000 else str(x)
@@ -38,12 +39,12 @@ gp = [(a, b, round(100 * (d - sv))) for a, b, d, sv in zip(e, e[1:], o1["curve"]
 first = next(x for i, x in enumerate(gp) if all(y[2] > 0 for y in gp[i:]))
 gaptxt = ("**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool "
           "search, shuffle 1: " + ", ".join(f"{kk(a)}–{kk(b)} tasks {g:+d}" for a, b, g in gp if a >= 100) +
-          f". Deja is below tool search for its first 100 tasks and ahead from the {kk(first[0])}–{kk(first[1])} bucket on "
+          f". Deja is {cold_rel} tool search over its first 100 tasks ({cold}) and ahead from the {kk(first[0])}–{kk(first[1])} bucket on "
           "(v4 was ahead from 100–200; the ~400 figure in the launch article was v2).")
 held = (f"**Held out, live from HydraDB:** on {H['n']} tasks the served graph never learned from (all answerable), every tool that worked was "
         f"in the first loadout for **{100*H['deja']:.1f}%** vs tool search {100*H['vector']:.1f}%; loadouts carried a chronically broken tool "
         f"{100*H['deja_broken']:.1f}% of the time vs {100*H['vector_broken']:.1f}% for tool search. The served policy answered with Deja on "
-        f"{H['modes']['deja']}, fell back to tool search on {H['modes']['fallback']} and abstained on {H['modes']['abstain']}. Graph reads per loadout "
+        f"{H['modes']['deja']} and abstained on {H['modes']['abstain']}. Graph reads per loadout "
         f"p50 {H['latency_ms']['p50']:.0f} ms / p95 {H['latency_ms']['p95']:.0f} ms. Every served decision and loadout is identical to the "
         f"in-memory twin (`matches_oracle: {H['matches_oracle']}`).") if H else ""
 OC = json.load(open("data/outcome.json")) if os.path.exists("data/outcome.json") else {}
@@ -127,7 +128,7 @@ if CC: life += (f"\n\n**The same test through the server's loadout path** (`cata
                 "version, and the server re-reads the tool list whenever the version changes, whichever process made the change.")
 load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner "
         f"keeps writing new tasks: **{L['errors']} errors**, {L['qps']:.1f} loadouts/s, p50 {L['p50']:.0f} ms, p95 {L['p95']:.0f} ms, {L['writes']} tasks learned meanwhile. A single planner gets {L['single_reader_qps']:.1f}/s at p50 {L['single_reader_p50']:.0f} ms, so 16 planners give "
-        f"{L['qps']/L['single_reader_qps']:.1f}× the throughput. The step-vote read costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners.") if L else ""
+        f"{L['qps']/L['single_reader_qps']:.1f}× the throughput. Step recall costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners. The step votes share one graph read with the task votes; what remains is likely the extra per-step neighbour searches, which run in Python.") if L else ""
 
 readme = f"""# Deja: learned tool loadouts for agents, on HydraDB
 
@@ -142,7 +143,7 @@ needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sh
 ## Results
 
 **The served model learns only from tool calls that worked** (12–15% of recorded calls errored), abstains when nothing in
-the catalog fits, falls back to plain tool search when memory has nothing close, and reads the live tool catalog from the
+the catalog fits, ramps memory's weight up over its first 400 tasks (cold start), and reads the live tool catalog from the
 graph. Each of those is measured below. First, the core comparison, which learns from and scores *every called tool*:
 
 8,612 tasks run against real MCP servers (Toucan-1.5M: questions LLM-generated from each server's tools, tool calls
@@ -169,7 +170,9 @@ base adds 0.15 · BM25 to cosine (tried 0.05, 0.15, 0.25, 0.35). Word weight 0.5
 v1. **v5 (from a reviewer's analysis, reproduced here):** each step of a multi-step task ("…, then …", sentence ends) also
 recalls its own 20 nearest past tasks, which vote the same way, and a tool keeps its best step vote (weight 0.5, tried
 0.25–1.0); and every ranked method subtracts 0.05 · ln(tokens) so a long schema has to earn its space (tried 0.02–0.2).
-We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **The memory-only baseline
+We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **Cold-start ramp:** memory's
+weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for memory-only too; 400 was best of
+50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **The memory-only baseline
 and tool search get the same changes** (step votes for memory-only, the length penalty for both), so the graph's gain is
 measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
 than in v4.
@@ -241,9 +244,10 @@ seeds 2 and 3:
 {abt}
 
 **The graph doesn't help here.** Adding the graph signals (vote share, neighbour agreement, server spread, co-use
-coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. Cold-start fallback
-(plain tool search when the closest past task is below {abtau:.2f}): {fbs}; it helps in the first few hundred tasks and is
-neutral after.
+coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. **No cold-start
+fallback any more:** v4/v5 switched to plain tool search when the closest past task was below 0.66. With memory's
+weight ramping up over the first 400 tasks, the best switch point fit on seed 1 is {abtau:.2f}, i.e. never switch, so the
+fallback was removed.
 
 **Remembering what couldn't be served.** The shipped rule forgets every task it abstained on, so the 50th request for a
 missing capability looks as new as the first. Remembering each unserved task (a `Task` node with no `USED` edge) adds
@@ -277,8 +281,8 @@ one edge and gives the `Catalog` node a new version; every read is filtered to t
 (:Tool) -[:CO]-> (:CoLink {{n}}) -[:TO]-> (:Tool)              tools used together in one task
 ```
 
-0. **Abstain or fall back:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits,
-   load nothing and say why; if no past task is close, use plain tool search; otherwise continue.
+0. **Abstain:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits, load nothing
+   and say why; otherwise continue. (Cold start: memory's weights ramp up over the first 400 tasks learned.)
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
    weighted by similarity. `fused = base + 1.0 · votes`, where `base = cosine + 0.15 · BM25/max(BM25)` and each neighbour's vote is
@@ -323,9 +327,9 @@ query nodes over the same object store, which we haven't done here.
   tasks, so that row is noisy). Organic traffic would sit lower in the table. The tool calls and their results are real.
 - **Step recall fits how these questions were written.** 98% of Toucan tasks split into steps because an LLM wrote them as
   multi-step requests; real prompts will split less often, and gain less from it.
-- **Cold start.** Over its first 100 tasks Deja is below its own hybrid base used as plain tool search ({cold}, shuffle 1;
-  worse than v4's 37% vs 41%); after that memory pays off.
-  The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
+- **Cold start.** Over its first 100 tasks Deja is {cold_rel} its own hybrid base used as plain tool search ({cold},
+  shuffle 1), not ahead: memory has little to offer yet. Memory's weight ramps up over the first 400 tasks; without the
+  ramp, v5 was at 33% vs 45%. A hosted version would start warm from memory shared
   across a team's agents.
 - **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
   "no fitting tool" labels come from held-out server clusters and an embedding-based substitute check, not from people.
@@ -365,7 +369,7 @@ uv run python retr.py 2000          # prequential eval, 4 orderings -> data/resu
 uv run python hydra_store.py        # HydraDB loadouts == in-memory twin (asserts)
 uv run python load.py 16            # 16 concurrent planners + 1 learner writing
 uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
-uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
+uv run python abstain.py            # abstention benchmark (+ fallback switch point, now 0) -> data/abstain.json
 uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
 uv run python catalog_check.py      # tool removal through the server's loadout path -> data/catalog_check.json
 uv run --with matplotlib python charts.py docs/img

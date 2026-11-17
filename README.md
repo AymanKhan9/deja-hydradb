@@ -11,7 +11,7 @@ needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sh
 ## Results
 
 **The served model learns only from tool calls that worked** (12–15% of recorded calls errored), abstains when nothing in
-the catalog fits, falls back to plain tool search when memory has nothing close, and reads the live tool catalog from the
+the catalog fits, ramps memory's weight up over its first 400 tasks (cold start), and reads the live tool catalog from the
 graph. Each of those is measured below. First, the core comparison, which learns from and scores *every called tool*:
 
 8,612 tasks run against real MCP servers (Toucan-1.5M: questions LLM-generated from each server's tools, tool calls
@@ -26,18 +26,18 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 | **Tool search: Deja's base alone** (cosine + 0.15 · BM25) | 46.1% | 30.0% |
 | Load whole servers, vector-ranked | 43.5% | 12.6% |
 | Vector + learned popularity (non-graph learner) | 43.0–43.5% | 22.8–24.6% |
-| **Past-task memory, no graph** (same base; the 20 nearest past tasks to the task and to each of its steps vote) | 71.6–72.4% | 49.4–50.4% |
+| **Past-task memory, no graph** (same base; the 20 nearest past tasks to the task and to each of its steps vote) | 71.7–72.6% | 49.4–50.5% |
 | Deja v1, first shipped: word + co-use edges, no task memory | 52.4–53.2% | 27.3–28.4% |
-| **Deja**: hybrid base + task and step memory in HydraDB + co-use hop + word hop | 72.1–73.1% | 49.6–51.2% |
-| Deja without word edges (ablation) | 72.0–72.9% | 49.0–50.4% |
-| Deja without co-use edges (ablation) | 71.9–72.7% | 50.2–51.2% |
+| **Deja**: hybrid base + task and step memory in HydraDB + co-use hop + word hop | 72.3–73.4% | 49.6–51.4% |
+| Deja without word edges (ablation) | 72.1–73.1% | 49.0–50.5% |
+| Deja without co-use edges (ablation) | 72.0–73.0% | 50.2–51.4% |
 | *v4 for reference (before step recall and the length penalty)*: tool search / memory-only / Deja | 43.6% / 68.1–68.7% / 70.4–70.9% | 27.2% / 42.2–43.4% / 45.4–45.8% |
 
-**Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **81.4%** vs tool search 47.2%; loadouts carried a chronically broken tool 0.0% of the time vs 56.5% for tool search. The served policy answered with Deja on 198, fell back to tool search on 0 and abstained on 2. Graph reads per loadout p50 117 ms / p95 207 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
+**Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **81.4%** vs tool search 47.2%; loadouts carried a chronically broken tool 0.0% of the time vs 56.5% for tool search. The served policy answered with Deja on 198 and abstained on 2. Graph reads per loadout p50 115 ms / p95 201 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
 
 **Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
 graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
-`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth 0.8 points overall and
+`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth 0.9 points overall and
 0.7 on multi-server tasks (means over the 4 orderings; see the ablation rows for each hop). Our first shipped version (v1) had no task memory and lost to this baseline. A reviewer added the
 baseline, we reproduced it, and we rebuilt around it. The v1 row stays in the table.
 
@@ -49,14 +49,16 @@ base adds 0.15 · BM25 to cosine (tried 0.05, 0.15, 0.25, 0.35). Word weight 0.5
 v1. **v5 (from a reviewer's analysis, reproduced here):** each step of a multi-step task ("…, then …", sentence ends) also
 recalls its own 20 nearest past tasks, which vote the same way, and a tool keeps its best step vote (weight 0.5, tried
 0.25–1.0); and every ranked method subtracts 0.05 · ln(tokens) so a long schema has to earn its space (tried 0.02–0.2).
-We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **The memory-only baseline
+We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **Cold-start ramp:** memory's
+weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for memory-only too; 400 was best of
+50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **The memory-only baseline
 and tool search get the same changes** (step votes for memory-only, the length penalty for both), so the graph's gain is
 measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
 than in v4.
 
-Paired over shuffle 1, Deja minus memory-only is **+0.74 points (95% bootstrap CI +0.41 to +1.09)**, and +0.80 on multi-server tasks (+0.04 to +1.55); Deja alone gets 146 tasks right that memory-only misses, against 82 the other way.
+Paired over shuffle 1, Deja minus memory-only is **+0.81 points (95% bootstrap CI +0.48 to +1.16)**, and +0.91 on multi-server tasks (+0.19 to +1.67); Deja alone gets 148 tasks right that memory-only misses, against 78 the other way.
 
-**Where Deja still misses** (shuffle 1, 2,313 misses): 4% need more tools than fit in 2,000 tokens, 24% need a tool that no past task has used yet, and 72% had every tool in memory but ranked it too low. On the 10% of tasks that need a never-used tool, Deja gets 35.1% against 41.0% for its own base alone: memory can't help with a tool it has never seen. The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
+**Where Deja still misses** (shuffle 1, 2,289 misses): 4% need more tools than fit in 2,000 tokens, 24% need a tool that no past task has used yet, and 73% had every tool in memory but ranked it too low. On the 10% of tasks that need a never-used tool, Deja gets 38.1% against 41.0% for its own base alone: memory can't help with a tool it has never seen. The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
 HydraDB reads on the held-out set and in `python hydra_store.py`, which also checks the per-task learning path: bulk-load
 300 tasks, ingest 100 one at a time, and require identical loadouts on the next 100.
 
@@ -70,11 +72,11 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 |---|---|---|---|---|---|---|---|---|---|
 | Tool search (vector) | 34% | 30% | 38% | 38% | 41% | 36% | 37% | 38% | 38% |
 | Tool search (Deja's base) | 48% | 42% | 52% | 44% | 50% | 46% | 45% | 46% | 47% |
-| Past-task memory, no graph | 42% | 28% | 53% | 54% | 62% | 65% | 71% | 75% | 78% |
+| Past-task memory, no graph | 52% | 40% | 58% | 55% | 62% | 65% | 71% | 75% | 78% |
 | Deja v1 | 38% | 30% | 45% | 42% | 49% | 50% | 51% | 54% | 55% |
-| Deja | 40% | 26% | 51% | 54% | 61% | 66% | 72% | 76% | 79% |
+| Deja | 52% | 40% | 59% | 56% | 61% | 66% | 72% | 76% | 79% |
 
-**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool search, shuffle 1: 100–200 tasks -1, 200–400 tasks +11, 400–800 tasks +11, 800–1.6k tasks +21, 1.6k–3.2k tasks +27, 3.2k–6.4k tasks +30, 6.4k–8.6k tasks +32. Deja is below tool search for its first 100 tasks and ahead from the 200–400 bucket on (v4 was ahead from 100–200; the ~400 figure in the launch article was v2). 72% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling.
+**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool search, shuffle 1: 100–200 tasks +7, 200–400 tasks +12, 400–800 tasks +11, 800–1.6k tasks +21, 1.6k–3.2k tasks +27, 3.2k–6.4k tasks +30, 6.4k–8.6k tasks +32. Deja is level with tool search over its first 100 tasks (46% vs 45%) and ahead from the 100–200 bucket on (v4 was ahead from 100–200; the ~400 figure in the launch article was v2). 73% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling.
 
 **Does the lead need near-duplicates?** Toucan's questions recur by construction, so here is accuracy by how similar the
 closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
@@ -94,8 +96,8 @@ about trending GitHub repositories are 0.76 similar.
 |---|---|---|---|
 | Tool search (vector) | 26.5% | 37.4% | 48.2% |
 | Tool search (Deja's base) | 32.0% | 46.1% | 59.3% |
-| Past-task memory, no graph | 56.3% | 72.4% | 82.1% |
-| Deja | 56.9% | 73.1% | 83.1% |
+| Past-task memory, no graph | 56.4% | 72.6% | 82.2% |
+| Deja | 57.1% | 73.4% | 83.2% |
 
 ### Learning only from calls that worked
 
@@ -110,12 +112,12 @@ only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails i
 |---|---|---|---|
 | Tool search (vector) | 40.0% | 37.4% | 35.0% |
 | Tool search (Deja's base) | 49.0% | 46.1% | 50.1% |
-| Past-task memory, learning from every call | 74.3% | 72.0% | 49.3% |
-| Deja, learning from every call | 75.0% | 73.0% | 48.9% |
-| Past-task memory, successes only | 74.9% | 67.6% | 28.2% |
-| Deja, successes only | 75.7% | 68.2% | 25.8% |
-| **Deja, successes only + quarantine (served)** | 75.5% | 64.1% | 8.5% |
-| Deja, successes only + reliability penalty (dropped) | 69.3% | 56.6% | 5.3% |
+| Past-task memory, learning from every call | 74.4% | 72.2% | 49.2% |
+| Deja, learning from every call | 75.3% | 73.2% | 48.8% |
+| Past-task memory, successes only | 75.0% | 67.8% | 28.6% |
+| Deja, successes only | 76.0% | 68.4% | 26.3% |
+| **Deja, successes only + quarantine (served)** | 75.7% | 64.3% | 8.9% |
+| Deja, successes only + reliability penalty (dropped) | 69.5% | 56.8% | 5.8% |
 
 On the tools that worked it is as good or slightly better, and loadouts carrying a broken tool drop by more than half.
 The v5 length penalty packs more, shorter tools into the same budget (tool search: 18 tools per loadout instead of 14), so
@@ -140,21 +142,22 @@ cosine < 0.80; hand-checked substitutes score 0.83–0.93, non-substitutes 0.52�
 about half the "unanswerable" weather tasks still had a working weather server left. Unanswerable tasks per seed:
 431, 317, 368.
 
-How well each signal separates answerable from unanswerable tasks (AUROC, 3 seeds, warm memory): closest past task 0.84–0.89, best tool match 0.66–0.78, top vote share 0.73–0.84, neighbour agreement 0.68–0.76, server spread 0.44–0.49, co-use coherence 0.54–0.58.
+How well each signal separates answerable from unanswerable tasks (AUROC, 3 seeds, warm memory): closest past task 0.84–0.89, best tool match 0.66–0.78, top vote share 0.73–0.84, neighbour agreement 0.68–0.76, server spread 0.45–0.50, co-use coherence 0.55–0.59.
 The abstain rule is a two-feature logistic regression (closest past task, best tool match) fit on seed 1 and tested on
 seeds 2 and 3:
 
 | Allowed wrong abstentions (fit on seed 1) | No-fit tasks caught (seed 2 / 3) | Answerable wrongly abstained (seed 2 / 3) | Same, with graph signals added: caught |
 |---|---|---|---|
-| 2% | 21% / 12% | 2% / 2% | 24% / 13% |
-| 5% (served) | 46% / 31% | 5% / 5% | 49% / 32% |
-| 10% | 67% / 49% | 11% / 11% | 69% / 50% |
+| 2% | 21% / 12% | 2% / 2% | 27% / 14% |
+| 5% (served) | 46% / 31% | 5% / 5% | 48% / 31% |
+| 10% | 67% / 49% | 11% / 11% | 69% / 49% |
 | 20% | 83% / 71% | 22% / 21% | 84% / 67% |
 
 **The graph doesn't help here.** Adding the graph signals (vote share, neighbour agreement, server spread, co-use
-coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. Cold-start fallback
-(plain tool search when the closest past task is below 0.66): 74.7% → 74.7% (seed 2), 75.3% → 75.4% (seed 3); it helps in the first few hundred tasks and is
-neutral after.
+coherence) changed the catch rate by −2 to +2 points, so the served rule uses similarity only. **No cold-start
+fallback any more:** v4/v5 switched to plain tool search when the closest past task was below 0.66. With memory's
+weight ramping up over the first 400 tasks, the best switch point fit on seed 1 is 0.00, i.e. never switch, so the
+fallback was removed.
 
 **Remembering what couldn't be served.** The shipped rule forgets every task it abstained on, so the 50th request for a
 missing capability looks as new as the first. Remembering each unserved task (a `Task` node with no `USED` edge) adds
@@ -196,8 +199,8 @@ one edge and gives the `Catalog` node a new version; every read is filtered to t
 (:Tool) -[:CO]-> (:CoLink {n}) -[:TO]-> (:Tool)              tools used together in one task
 ```
 
-0. **Abstain or fall back:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits,
-   load nothing and say why; if no past task is close, use plain tool search; otherwise continue.
+0. **Abstain:** a two-feature rule (closest past task, best tool match) decides first. If nothing fits, load nothing
+   and say why; otherwise continue. (Cold start: memory's weights ramp up over the first 400 tasks learned.)
 1. **Recall similar tasks:** embed the task (bge-small) and pick the 20 most similar past tasks by cosine (numpy, a plain
    vector index). Read their `USED` edges from HydraDB in one id-anchored batched read; each votes for its tools,
    weighted by similarity. `fused = base + 1.0 · votes`, where `base = cosine + 0.15 · BM25/max(BM25)` and each neighbour's vote is
@@ -220,7 +223,7 @@ HydraDB specifics that shaped the design:
 
 ## Under load
 
-16 concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner keeps writing new tasks: **0 errors**, 7.2 loadouts/s, p50 2264 ms, p95 3041 ms, 39 tasks learned meanwhile. A single planner gets 2.5/s at p50 406 ms, so 16 planners give 2.9× the throughput. The step-vote read costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners. Correct under contention; throughput is the ceiling of one node on one machine. HydraDB scales reads by adding
+16 concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner keeps writing new tasks: **0 errors**, 8.1 loadouts/s, p50 1996 ms, p95 2790 ms, 37 tasks learned meanwhile. A single planner gets 2.6/s at p50 385 ms, so 16 planners give 3.2× the throughput. Step recall costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners. The step votes share one graph read with the task votes; what remains is likely the extra per-step neighbour searches, which run in Python. Correct under contention; throughput is the ceiling of one node on one machine. HydraDB scales reads by adding
 query nodes over the same object store, which we haven't done here.
 
 ## With an agent in the loop
@@ -251,9 +254,9 @@ Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was b
   tasks, so that row is noisy). Organic traffic would sit lower in the table. The tool calls and their results are real.
 - **Step recall fits how these questions were written.** 98% of Toucan tasks split into steps because an LLM wrote them as
   multi-step requests; real prompts will split less often, and gain less from it.
-- **Cold start.** Over its first 100 tasks Deja is below its own hybrid base used as plain tool search (33% vs 45%, shuffle 1;
-  worse than v4's 37% vs 41%); after that memory pays off.
-  The fallback to tool search softens it but doesn't remove it. A hosted version would start warm from memory shared
+- **Cold start.** Over its first 100 tasks Deja is level with its own hybrid base used as plain tool search (46% vs 45%,
+  shuffle 1), not ahead: memory has little to offer yet. Memory's weight ramps up over the first 400 tasks; without the
+  ramp, v5 was at 33% vs 45%. A hosted version would start warm from memory shared
   across a team's agents.
 - **Abstaining is partial.** At 5% wrong abstentions it catches 31–46% of tasks with no fitting tool. The benchmark's
   "no fitting tool" labels come from held-out server clusters and an embedding-based substitute check, not from people.
@@ -293,7 +296,7 @@ uv run python retr.py 2000          # prequential eval, 4 orderings -> data/resu
 uv run python hydra_store.py        # HydraDB loadouts == in-memory twin (asserts)
 uv run python load.py 16            # 16 concurrent planners + 1 learner writing
 uv run python outcome.py            # learning only from calls that worked -> data/outcome.json
-uv run python abstain.py            # abstention benchmark + cold-start fallback -> data/abstain.json
+uv run python abstain.py            # abstention benchmark (+ fallback switch point, now 0) -> data/abstain.json
 uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
 uv run python catalog_check.py      # tool removal through the server's loadout path -> data/catalog_check.json
 uv run --with matplotlib python charts.py docs/img

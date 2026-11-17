@@ -91,15 +91,15 @@ class Learned:
     def knn_scores(s, qvec):
         nb = [(i, w ** s.VOTE_POW) for i, w in s.neighbours(qvec)]
         return dict(tally(nb, s.votes(nb))) if nb else {}
-    def clause_scores(s, C):
-        """Each clause of a multi-step task finds its own 20 nearest past tasks, which vote exactly as for the whole task;
-        a tool keeps its best clause vote. One graph read for all clauses."""
-        if not len(C) or not s.past: return {}
-        nbs = [[(i, w ** s.VOTE_POW) for i, w in s.neighbours(c)] for c in C]
-        used = s.votes([(i, 0) for i in sorted({i for nb in nbs for i, _ in nb})]); out = collections.Counter()
-        for nb in nbs:
-            for g, x in tally(nb, used).items(): out[g] = max(out[g], x)
-        return dict(out)
+    def task_and_step_votes(s, qvec, C):
+        """Whole-task votes, and per-step votes: each step of a multi-step task finds its own 20 nearest past tasks, which
+        vote exactly as for the whole task; a tool keeps its best step vote. One graph read for the task and all its steps."""
+        nbs = [[(i, w ** s.VOTE_POW) for i, w in s.neighbours(v)] for v in (qvec, *C)]
+        if not nbs[0]: return {}, {}
+        used = s.votes([(i, 0) for i in sorted({i for nb in nbs for i, _ in nb})]); cl = collections.Counter()
+        for nb in nbs[1:]:
+            for g, x in tally(nb, used).items(): cl[g] = max(cl[g], x)
+        return dict(tally(nbs[0], used)), dict(cl)
     def held(s):
         """Tools whose recent record is clearly bad (>= Q_FAIL of their last Q_WIN outcomes failed). Graph: Quarantine-HOLDS->Tool."""
         return {n for n, d in s.recent.items() if len(d) == s.Q_WIN and d.count(0) >= s.Q_FAIL}
@@ -159,6 +159,8 @@ def pack(ranked, cat, budget):
 LAM, BETA, GAMMA, SEEDS = 1.0, 0.5, 0.2, 5
 CLAUSE, TOKPEN = 0.5, 0.05   # v5: clause votes weight; length penalty TOKPEN*ln(tokens) for every ranked method (both chosen on shuffle 1)
 def tp(n): return TOKPEN * _LT[n]
+RAMP = int(os.environ.get("DEJA_RAMP", 400))   # cold start: memory's weights scale with min(1, tasks learned / RAMP) (chosen on shuffle 1; 0 = off)
+def ramp(L): return min(1.0, L.N / RAMP) if RAMP else 1.0
 
 def rank(cand, score):
     return sorted(cand, key=lambda n: (-round(float(score(n)), 9), n))   # deterministic ties
@@ -168,14 +170,13 @@ def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True
     active: the current catalog (set of tool names) — tools outside it are never scored, whatever memory says;
     the caller passes V already restricted to it."""
     keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
-    cl = keep(L.clause_scores(clause_vecs(q))) if use_knn else {}   # before knn_scores: the UI explains whole-task votes
-    kn = keep(L.knn_scores(qvec)) if use_knn else {}
+    kn, cl = map(keep, L.task_and_step_votes(qvec, clause_vecs(q))) if use_knn else ({}, {})
     b = base if base is not None else base_scores(q, sim)          # base relevance: cosine + BM25 (hybrid)
-    fused = lambda n: b[nix[n]] + LAM * kn.get(n, 0)
+    r = ramp(L); fused = lambda n: b[nix[n]] + r * LAM * kn.get(n, 0)
     seeds = rank(set(V[:200]) | set(kn), fused)[:SEEDS]           # co-use hop starts from the memory-informed top 5
     ts = keep(L.term_scores(q)) if use_terms else {}
     cs = keep(L.co_scores(seeds)) if use_co else {}
-    final = lambda n: fused(n) + BETA * ts.get(n, 0) + GAMMA * cs.get(n, 0) + CLAUSE * cl.get(n, 0) - tp(n)
+    final = lambda n: fused(n) + r * (BETA * ts.get(n, 0) + GAMMA * cs.get(n, 0) + CLAUSE * cl.get(n, 0)) - tp(n)
     return rank(set(V[:200]) | set(kn) | set(ts) | set(cs) | set(cl), final), {"knn": kn, "terms": ts, "co": cs, "clause": cl}
 
 def search_rank(q, sim, V, nix):
@@ -185,8 +186,8 @@ def search_rank(q, sim, V, nix):
 def memory_rank(L, q, qvec, sim, V, nix, active=None):
     """Memory-only baseline: the same base, task votes and clause votes as Deja, no graph hops."""
     keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
-    b = base_scores(q, sim); cl = keep(L.clause_scores(clause_vecs(q))); kn = keep(L.knn_scores(qvec))
-    return rank(set(V[:200]) | set(kn) | set(cl), lambda n: b[nix[n]] + LAM * kn.get(n, 0) + CLAUSE * cl.get(n, 0) - tp(n))
+    b = base_scores(q, sim); kn, cl = map(keep, L.task_and_step_votes(qvec, clause_vecs(q)))
+    r = ramp(L); return rank(set(V[:200]) | set(kn) | set(cl), lambda n: b[nix[n]] + r * (LAM * kn.get(n, 0) + CLAUSE * cl.get(n, 0)) - tp(n))
 
 class BM25:
     """Okapi BM25 over each tool's "name: description" (the lexical tool-search baseline)."""
