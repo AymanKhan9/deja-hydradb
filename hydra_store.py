@@ -56,15 +56,22 @@ class HydraLearned(Learned):
     def ingest(s, task):
         """Incremental write after each task. Task memory is append-only; counts rewrite the touched terms' current top-K
         links. A link that later drops out of a top K stays in the graph, and term_scores cuts it at read time."""
-        before = Learned.held(s); super().ingest(task); after = Learned.held(s)
-        if before != after:            # keep (:Quarantine)-[:HOLDS]->(:Tool) in step with the learner
-            s.db.nodes("Quarantine", [{"id": QUARANTINE, "key": "quarantine"}], ["key"])
-            s.db.edges("HOLDS", [(QUARANTINE, hid("tool", n)) for n in after - before])
-            for n in before - after: s.db.q("MATCH (q {id: $q})-[r:HOLDS]->(t {id: $t}) DELETE r", q=QUARANTINE, t=hid("tool", n))
+        before = Learned.held(s); super().ingest(task); s._sync_holds(before)
         lk = [(w, g) for w in terms(task["q"]) for g, _ in s.links(w)]
         v = s.view(task)
         co = {(a, b) for a in v["gold"] for b in v["gold"] if a != b} | {tuple(f) for f in v["flows"]}
         s._write([task], lk, co, set(v["gold"]) | {b for _, b in co})
+    def record_failures(s, task):
+        """A task where nothing worked teaches no tool, but its failed calls still count toward quarantine."""
+        before = Learned.held(s)
+        for g in task.get("failed", ()): s.recent[g].append(0)
+        s._sync_holds(before)
+    def _sync_holds(s, before):
+        after = Learned.held(s)
+        if before != after:            # keep (:Quarantine)-[:HOLDS]->(:Tool) in step with the learner
+            s.db.nodes("Quarantine", [{"id": QUARANTINE, "key": "quarantine"}], ["key"])
+            s.db.edges("HOLDS", [(QUARANTINE, hid("tool", n)) for n in after - before])
+            for n in before - after: s.db.q("MATCH (q {id: $q})-[r:HOLDS]->(t {id: $t}) DELETE r", q=QUARANTINE, t=hid("tool", n))
     def bulk_load(s, tasks):
         """Boot path: learn from many tasks in memory, then write the whole graph in 1000-row batches (labels first)."""
         for t in tasks: Learned.ingest(s, t)

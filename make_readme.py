@@ -126,6 +126,16 @@ if CC: life += (f"\n\n**The same test through the server's loadout path** (`cata
                 "server cached the catalog for 5 s, so a removed tool could be served for up to 5 s after removal; this test failed "
                 "on that version (14 of 20 still loaded the removed tool). Now every catalog write gives the `Catalog` node a new "
                 "version, and the server re-reads the tool list whenever the version changes, whichever process made the change.")
+PC = json.load(open("data/proxy_check.json")) if os.path.exists("data/proxy_check.json") else {}
+proxy_res = (f"`proxy_check.py` runs it end to end over real stdio (a scripted MCP client → `proxy.py` → three fixture MCP "
+             f"servers as subprocesses, HydraDB underneath, 110-token budget so loadouts have to choose): the agent sees "
+             f"{len(PC['agent_sees'])} tools; a picnic task first got `{', '.join(PC['picnic_loadout_before_learning'])}`, the agent "
+             f"needed a note each time, and after 3 such tasks the loadout was `{', '.join(PC['picnic_loadout_after_3_tasks'])}`; a "
+             f"tool that failed 5 times in a row was quarantined (`{', '.join(PC['quarantined'])}`) and left out of the next "
+             f"loadout; after an upstream dropped `notes-search_notes` it was neither loaded nor listed, and calling it fails; "
+             f"a task where nothing worked was logged as unserved; and after a restart memory came back with "
+             f"{PC['memory_after_restart']} tasks and the same picnic loadout. Smoke-tested in front of real servers too "
+             f"(`mcp-server-time`, `@modelcontextprotocol/server-everything`: 25 tools, a forwarded call, the task learned).") if PC else ""
 load = (f"{L['readers']} concurrent planners computing full loadouts (task-vote, step-vote, word and co-use reads) from one single-node HydraDB while a learner "
         f"keeps writing new tasks: **{L['errors']} errors**, {L['qps']:.1f} loadouts/s, p50 {L['p50']:.0f} ms, p95 {L['p95']:.0f} ms, {L['writes']} tasks learned meanwhile. A single planner gets {L['single_reader_qps']:.1f}/s at p50 {L['single_reader_p50']:.0f} ms, so 16 planners give "
         f"{L['qps']/L['single_reader_qps']:.1f}× the throughput. Step recall costs throughput under contention: v4, without it, did 10.3 loadouts/s with 16 planners. The step votes share one graph read with the task votes; what remains is likely the extra per-step neighbour searches, which run in Python.") if L else ""
@@ -312,11 +322,35 @@ query nodes over the same object store, which we haven't done here.
 
 {agent}
 
-## Not done yet
+## Use it with your agent: the MCP proxy
 
-- **An MCP proxy.** As a proxy in front of real MCP servers Deja would get call outcomes from `isError`, catalog changes
-  from `tools/list_changed`, and the unserved signal from tasks that end without a call, and could learn from real
-  agent traffic instead of Toucan's generated questions.
+`proxy.py` is an MCP server that sits in front of your real MCP servers and learns from your agent's traffic, into
+HydraDB. The agent sees two tools, so it works with any MCP client:
+
+- `deja_load_tools(task, more=[])`: the loadout for this task. Full schemas for the tools Deja picks within the token
+  budget, plus one-line listings of the next few. `more=[names]` loads listed ones (logged as loadout misses).
+- `deja_call(tool, arguments)`: forwards the call to the upstream server that owns the tool.
+
+What it learns, from real calls rather than Toucan's generated questions: a tool whose call worked (`isError` false)
+gets a `USED` edge from the task, one that only failed gets `FAILED` and counts toward quarantine; a task where nothing
+worked is logged as unserved. The catalog is re-read from every upstream's `tools/list` at the start of each task and
+synced to `(:Catalog)-[:LISTS]->(:Tool)`, so a dropped tool is never loaded again. Memory survives restarts (the graph,
+plus a task log the in-memory mirror is rebuilt from).
+
+{proxy_res}
+
+```bash
+BUCKET=deja-proxy ./hydra.sh
+cp upstreams.example.json upstreams.json          # your servers, in the usual mcpServers format (command/args/env or url)
+claude mcp add deja -- uv run --directory "$PWD" python proxy.py upstreams.json      # or any MCP client, over stdio
+```
+
+What it doesn't do yet: memory starts empty (Toucan's memory doesn't transfer, the tool names differ), and memory's
+weight ramps up over the first `DEJA_RAMP` tasks (400, fit on Toucan's 2,236-tool catalog; a small catalog can use far
+fewer); the abstain rule isn't applied, because it was fit on Toucan and would abstain on everything while memory is
+empty; it serves one client at a time; and nobody has run real agents through it yet, so there are no real-traffic
+numbers. Exposing loaded tools natively (via `tools/list_changed`) instead of through `deja_call` is also left out:
+client support for refreshing tools mid-session varies.
 
 ## Limitations
 
@@ -379,6 +413,7 @@ uv run python catalog_check.py      # tool removal through the server's loadout 
 uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
+uv run python proxy_check.py        # the MCP proxy end to end (needs HydraDB up) -> data/proxy_check.json
 uv run python make_readme.py        # regenerate this README's tables from the results
 ```
 

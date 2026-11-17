@@ -239,11 +239,35 @@ Every number above is "the right tools were in the loadout". To check that this 
 
 Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was better on 41 tasks and worse on 3, at the same prompt size. 2 of 398 requests failed on the provider's credit limit and count as misses for both. One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success. This check ran on the v4 loadouts, before step recall and the length penalty; it hasn't been re-run on v5.
 
-## Not done yet
+## Use it with your agent: the MCP proxy
 
-- **An MCP proxy.** As a proxy in front of real MCP servers Deja would get call outcomes from `isError`, catalog changes
-  from `tools/list_changed`, and the unserved signal from tasks that end without a call, and could learn from real
-  agent traffic instead of Toucan's generated questions.
+`proxy.py` is an MCP server that sits in front of your real MCP servers and learns from your agent's traffic, into
+HydraDB. The agent sees two tools, so it works with any MCP client:
+
+- `deja_load_tools(task, more=[])`: the loadout for this task. Full schemas for the tools Deja picks within the token
+  budget, plus one-line listings of the next few. `more=[names]` loads listed ones (logged as loadout misses).
+- `deja_call(tool, arguments)`: forwards the call to the upstream server that owns the tool.
+
+What it learns, from real calls rather than Toucan's generated questions: a tool whose call worked (`isError` false)
+gets a `USED` edge from the task, one that only failed gets `FAILED` and counts toward quarantine; a task where nothing
+worked is logged as unserved. The catalog is re-read from every upstream's `tools/list` at the start of each task and
+synced to `(:Catalog)-[:LISTS]->(:Tool)`, so a dropped tool is never loaded again. Memory survives restarts (the graph,
+plus a task log the in-memory mirror is rebuilt from).
+
+`proxy_check.py` runs it end to end over real stdio (a scripted MCP client → `proxy.py` → three fixture MCP servers as subprocesses, HydraDB underneath, 110-token budget so loadouts have to choose): the agent sees 2 tools; a picnic task first got `calendar-list_events, weather-get_forecast`, the agent needed a note each time, and after 3 such tasks the loadout was `notes-add_note, weather-get_forecast`; a tool that failed 5 times in a row was quarantined (`weather-get_alerts`) and left out of the next loadout; after an upstream dropped `notes-search_notes` it was neither loaded nor listed, and calling it fails; a task where nothing worked was logged as unserved; and after a restart memory came back with 8 tasks and the same picnic loadout. Smoke-tested in front of real servers too (`mcp-server-time`, `@modelcontextprotocol/server-everything`: 25 tools, a forwarded call, the task learned).
+
+```bash
+BUCKET=deja-proxy ./hydra.sh
+cp upstreams.example.json upstreams.json          # your servers, in the usual mcpServers format (command/args/env or url)
+claude mcp add deja -- uv run --directory "$PWD" python proxy.py upstreams.json      # or any MCP client, over stdio
+```
+
+What it doesn't do yet: memory starts empty (Toucan's memory doesn't transfer, the tool names differ), and memory's
+weight ramps up over the first `DEJA_RAMP` tasks (400, fit on Toucan's 2,236-tool catalog; a small catalog can use far
+fewer); the abstain rule isn't applied, because it was fit on Toucan and would abstain on everything while memory is
+empty; it serves one client at a time; and nobody has run real agents through it yet, so there are no real-traffic
+numbers. Exposing loaded tools natively (via `tools/list_changed`) instead of through `deja_call` is also left out:
+client support for refreshing tools mid-session varies.
 
 ## Limitations
 
@@ -306,6 +330,7 @@ uv run python catalog_check.py      # tool removal through the server's loadout 
 uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
+uv run python proxy_check.py        # the MCP proxy end to end (needs HydraDB up) -> data/proxy_check.json
 uv run python make_readme.py        # regenerate this README's tables from the results
 ```
 

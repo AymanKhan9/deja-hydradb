@@ -81,6 +81,9 @@ ul{padding-left:20px}li{margin:4px 0}.note{color:var(--mute);font-size:13px}
  <div class="two" id="out"></div>
 </div>
 
+<h2>Use it with your agent</h2>
+<p class="sub"><code>proxy.py</code> is an MCP server in front of your real MCP servers. Your agent gets two tools: <code>deja_load_tools(task)</code> returns the loadout for the task, and <code>deja_call(tool, arguments)</code> forwards the call. Deja learns from the real calls into HydraDB: tools whose calls worked get <code>USED</code> edges, ones that only failed get <code>FAILED</code> and count toward quarantine, and the catalog is re-read from every server's <code>tools/list</code> at the start of each task. Tested end to end over stdio (learning, quarantine, a dropped tool, a restart) and in front of real servers; no real agent traffic has gone through it yet. Setup is in the README.</p>
+
 <h2>How it works</h2>
 <pre>(:Task) -[:USED]-> (:Tool)                                    every past task and the tools that worked for it
 (:Task) -[:FAILED]-> (:Tool)                                  calls that errored (recorded, never vote)

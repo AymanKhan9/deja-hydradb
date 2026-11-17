@@ -3,3 +3,4 @@ data/
 .hydradb/
 __pycache__/
 .vercel
+upstreams.json
