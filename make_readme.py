@@ -61,6 +61,12 @@ AN = json.load(open("data/analysis_v5.json")) if os.path.exists("data/analysis_v
 ci = (f"Paired over shuffle 1, Deja minus memory-only is **+{100*AN['diff']:.2f} points (95% bootstrap CI {100*AN['ci95'][0]:+.2f} to "
       f"{100*AN['ci95'][1]:+.2f})**, and +{100*AN['diff_multi']:.2f} on multi-server tasks ({100*AN['ci95_multi'][0]:+.2f} to {100*AN['ci95_multi'][1]:+.2f}); "
       f"Deja alone gets {AN['deja_only_wins']} tasks right that memory-only misses, against {AN['memory_only_wins']} the other way.") if AN else ""
+ci += ("\n\n**So the graph's own ranking gain is small, and further ranking ideas haven't widened it** (a session top-up and "
+       "substitute edges below both help memory-only nearly as much). The large gain is learned tool memory over tool search. "
+       "What the graph adds is that the memory, every call's outcome, the quarantine and the live catalog sit in one store "
+       "that the server, the learner and any number of planners read and write together: so loadouts carry a "
+       "chronically broken tool far less often, a removed tool is never served, and new tasks are visible to every "
+       "process as they are learned.")
 misses = (f"**Where Deja still misses** (shuffle 1, {AN['misses']:,} misses): {100*AN['miss_doesnt_fit']:.0f}% need more tools than fit in "
           f"2,000 tokens, {100*AN['miss_unseen_tool']:.0f}% need a tool that no past task has used yet, and {100*AN['miss_ranked_out']:.0f}% had every "
           f"tool in memory but ranked it too low. On the {100*AN['unseen_tasks']:.0f}% of tasks that need a never-used tool, Deja gets "
@@ -118,6 +124,18 @@ if LF:
             f"{100*lm('filtered','success'):.1f}% success, against {100*lm('stale','success'):.1f}% when trusting stale memory, which also spends "
             f"{lm('stale','tokens_on_removed_tools'):.0f} tokens per loadout on tools that no longer exist. Tool search: {100*lm('vector','success'):.1f}%.")
 else: life = ""
+SC = json.load(open("data/subst_check.json")) if os.path.exists("data/subst_check.json") else {}
+if SC:
+    so = SC["orderings"].values(); rng = lambda k: f"{100*min(o[k] for o in so):.1f}–{100*max(o[k] for o in so):.1f}%"
+    sd = SC["deja_minus_memory_with_substitute"]
+    life += (f"\n\n**When a removed tool has a near-twin that stays** (`subst_check.py`, 3 orderings, 10% of tools removed halfway, "
+             f"tasks after the removal that needed a removed tool with a live tool at cosine ≥ 0.80): Deja as served, which "
+             f"drops a removed tool's votes, loaded every needed tool or a substitute for {rng('Deja, filter (shipped)')}; passing "
+             f"the removed tool's votes to its closest live substitute (a `SUBSTITUTE` edge) gives {rng('Deja + substitute')}. "
+             f"Tool search: {rng('tool search')}. Memory-only gains almost as much ({rng('memory-only, filter')} → "
+             f"{rng('memory-only + substitute')}), so Deja's lead over it with substitutes is {100*sd['diff']:+.2f} points "
+             f"(95% CI {100*sd['ci95'][0]:+.2f} to {100*sd['ci95'][1]:+.2f}): a real gain for the served model, not a graph-only one. "
+             f"Not shipped yet.")
 CC = json.load(open("data/catalog_check.json")) if os.path.exists("data/catalog_check.json") else {}
 if CC: life += (f"\n\n**The same test through the server's loadout path** (`catalog_check.py`, the function behind `/api/loadout`): "
                 f"{CC['cases']} tools removed while the server's catalog was warm were absent from both columns in "
@@ -362,6 +380,16 @@ DeepWiki: 58 tools). Two things the fixture test couldn't show, both now fixed:
 - Claude Code kills its MCP servers on exit, so a task learned "when the next one starts or on shutdown" was lost at
   the end of each session. Now the open task is written to disk after every call and learned on the next start.
 
+**Likely next tools.** When a call works, `deja_call`'s reply also carries full definitions of the tools learned to
+go with it (`CO` edges from the tools that worked, plus the task's original ranking), up to half the loadout budget per
+task. Offline (a reviewer's test, tasks after the first 400), topping up after the first calls beats loading the same
+budget up front by about 1.5 points, and by 7–9 on tasks whose first loadout was partly right; memory-only gets nearly
+the same gain. In Claude Code, after one time-then-knowledge-graph task, a second such task got only the
+time tool in its first loadout, and after that call the top-up returned `memory-search_nodes` and
+`memory-create_entities`, the two tools Claude called next. Claude also calls tools from the one-line "also available"
+list directly, guessing the arguments, so a loadout is a strong hint rather than a gate; the log records called tools
+that weren't loaded.
+
 Startup: Claude Code gets an answer in ~7 s; the upstreams start concurrently in the background (~14 s for these
 eight), and the first `deja_load_tools` waits for them. Tool and task embeddings are cached on disk, so only the first
 start pays for embedding long tool descriptions.
@@ -438,6 +466,7 @@ uv run python outcome.py            # learning only from calls that worked -> da
 uv run python abstain.py            # abstention benchmark (+ fallback switch point, now 0) -> data/abstain.json
 uv run python lifecycle.py          # tool removal on HydraDB + mid-stream removal -> data/lifecycle.json
 uv run python catalog_check.py      # tool removal through the server's loadout path -> data/catalog_check.json
+uv run python subst_check.py        # removed tools with a live near-twin: votes passed along SUBSTITUTE -> data/subst_check.json
 uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80

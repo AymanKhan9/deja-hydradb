@@ -165,11 +165,23 @@ def ramp(L): return min(1.0, L.N / RAMP) if RAMP else 1.0
 def rank(cand, score):
     return sorted(cand, key=lambda n: (-round(float(score(n)), 9), n))   # deterministic ties
 
-def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True, active=None, base=None):
+def live(active, sub=None):
+    """Filter memory's scores to the live catalog. sub (removed tool -> its live substitute): a removed tool's score
+    passes to its substitute instead of being dropped (graph: (:Tool)-[:SUBSTITUTE]->(:Tool), written on removal)."""
+    if active is None: return lambda d: d
+    def keep(d):
+        out = collections.Counter()
+        for n, v in d.items():
+            m = n if n in active else (sub or {}).get(n)
+            if m: out[m] += v
+        return dict(out)
+    return keep
+
+def deja_rank(L, q, qvec, sim, V, nix, use_knn=True, use_terms=True, use_co=True, active=None, base=None, sub=None):
     """Fused ranking. Returns (ranked tools, parts) so the UI can explain each pick.
     active: the current catalog (set of tool names) — tools outside it are never scored, whatever memory says;
     the caller passes V already restricted to it."""
-    keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
+    keep = live(active, sub)
     kn, cl = map(keep, L.task_and_step_votes(qvec, clause_vecs(q))) if use_knn else ({}, {})
     b = base if base is not None else base_scores(q, sim)          # base relevance: cosine + BM25 (hybrid)
     r = ramp(L); fused = lambda n: b[nix[n]] + r * LAM * kn.get(n, 0)
@@ -183,9 +195,9 @@ def search_rank(q, sim, V, nix):
     """Hybrid tool search (no memory): Deja's base relevance, same length penalty."""
     b = base_scores(q, sim); return rank(set(V[:200]), lambda n: b[nix[n]] - tp(n))
 
-def memory_rank(L, q, qvec, sim, V, nix, active=None):
+def memory_rank(L, q, qvec, sim, V, nix, active=None, sub=None):
     """Memory-only baseline: the same base, task votes and clause votes as Deja, no graph hops."""
-    keep = (lambda d: d) if active is None else (lambda d: {n: v for n, v in d.items() if n in active})
+    keep = live(active, sub)
     b = base_scores(q, sim); kn, cl = map(keep, L.task_and_step_votes(qvec, clause_vecs(q)))
     r = ramp(L); return rank(set(V[:200]) | set(kn) | set(cl), lambda n: b[nix[n]] + r * (LAM * kn.get(n, 0) + CLAUSE * cl.get(n, 0)) - tp(n))
 

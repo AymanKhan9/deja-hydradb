@@ -14,7 +14,7 @@ to (:Catalog)-[:LISTS]->(:Tool), so a tool an upstream drops is never loaded aga
   uv run python proxy.py upstreams.json                # stdio MCP server; upstreams in the usual mcpServers format
 State: the graph in HydraDB, plus data/proxy_tasks.jsonl (the task log the in-memory mirror is rebuilt from on start).
 """
-import contextlib, fcntl, hashlib, json, math, os, re, sys, time
+import collections, contextlib, fcntl, hashlib, json, math, os, re, sys, time
 import anyio
 import numpy as np
 from mcp import Client, StdioServerParameters
@@ -31,6 +31,7 @@ LOG = os.environ.get("DEJA_LOG", "data/proxy_tasks.jsonl")
 PENDING = LOG + ".pending"                                         # the open task, saved after every call: clients may kill the proxy
 VECS = "data/proxy_tool_vecs.npz"                                 # tool embeddings by text hash: restarts skip re-embedding
 BUDGET, LISTED = int(os.environ.get("DEJA_BUDGET", 2000)), int(os.environ.get("DEJA_LISTED", 10))
+TOPUP = int(os.environ.get("DEJA_TOPUP", BUDGET // 2))          # tokens of "likely next" tools handed back with call results, per task
 retr.Learned.OUTCOME = True
 log = lambda *a: print(*a, file=sys.stderr, flush=True)       # stdout is the MCP channel
 
@@ -106,7 +107,7 @@ class Deja:
         if not s.learns or not c or not c["calls"] or c["qvec"] is None: return        # calls made without a task teach nothing
         ok = {n for n, v in c["calls"].items() if v}
         t = {"i": len(s.qrows), "q": c["q"], "gold": set(c["calls"]), "gold_ok": ok, "failed": set(c["calls"]) - ok, "flows": [],
-             "loaded": c["loaded"], "asked_for_more": sorted(c["more"])}
+             "loaded": c["loaded"], "asked_for_more": sorted(c["more"]), "topped_up": c.get("topped_up", [])}
         if ok:
             s.qrows.append(c["qvec"]); retr.Learned.Q = np.array(s.qrows); s.L.ingest(t)
         else: t["unserved"] = True; s.L.record_failures(t)            # nothing worked: logged, teaches no tool, failures still count
@@ -127,7 +128,7 @@ class Deja:
         V = [s.names[k] for k in np.argsort(-sim, kind="stable") if s.names[k] in active][:400]
         ranked = retr.deja_rank(s.L, task, qv, sim, V, s.nix, active=active)[0]
         picked = retr.pack(ranked, s.cat, BUDGET); listed = [n for n in ranked if n not in picked][:LISTED]
-        s.cur = {"q": task, "qvec": qv, "calls": {}, "loaded": picked, "more": set()}
+        s.cur = {"q": task, "qvec": qv, "calls": {}, "loaded": picked, "more": set(), "ranked": ranked[:60], "topup_left": TOPUP}
         return {"tools": [s.full(n) for n in picked],
                 "also_available": [{"name": n, "description": s.cat[n]["description"][:100]} for n in listed],
                 "memory": {"past_tasks": len(s.qrows), "quarantined": sorted(held)},
@@ -146,7 +147,27 @@ class Deja:
             json.dump({k: sorted(v) if isinstance(v, set) else v for k, v in s.cur.items() if k != "qvec"}, open(PENDING, "w"))
         text = "\n".join(getattr(b, "text", None) or f"[{b.type} content]" for b in r.content) or json.dumps(r.structured_content)
         if r.is_error: raise ToolError(text)
-        return text
+        nxt = s.next_tools()
+        return text + ("\n\n---\nDeja: tools this task will likely need next, now loaded (call them with deja_call):\n"
+                       + json.dumps([s.full(n) for n in nxt]) if nxt else "")
+
+    def next_tools(s):
+        """Top-up after a call works: tools that co-occur with the ones that worked ((:Tool)-[:CO]->(:CoLink)-[:TO]->(:Tool),
+        normalised by the called tool's uses) plus a prior from the task's original ranking, within what's left of TOPUP.
+        Offline (review v7, tasks after the first 400): +1.5 pts over loading the same budget up front, +7-9 on tasks
+        whose first loadout was partly right; memory-only gets nearly the same gain, so this is product, not a graph claim."""
+        c = s.cur
+        if not c.get("ranked") or c["topup_left"] <= 0: return []
+        co = collections.Counter()
+        for a in [n for n, ok in c["calls"].items() if ok]:
+            for b, v in s.L.co_scores([a]).items(): co[b] = max(co[b], v)
+        pos = {n: k for k, n in enumerate(c["ranked"])}; held = s.L.quarantined()
+        cand = [n for n in set(co) | set(c["ranked"]) if n in s.cat and n not in held and n not in c["loaded"] and n not in c["calls"]]
+        if not any(co.get(n) for n in cand): return []                  # nothing learned to go on: don't spend tokens on page 2
+        score = lambda n: co.get(n, 0) + 0.5 * math.exp(-pos.get(n, 10 ** 6) / 20) - retr.tp(n)
+        got = retr.pack(retr.rank(cand, score), s.cat, c["topup_left"])
+        c["topup_left"] -= sum(s.cat[n]["tokens"] for n in got); c["loaded"] = c["loaded"] + got; c.setdefault("topped_up", []).extend(got)
+        return got
 
 D = None
 

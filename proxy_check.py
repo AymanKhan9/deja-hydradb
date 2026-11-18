@@ -1,6 +1,6 @@
 """End-to-end check of proxy.py over real stdio: an MCP client -> Deja proxy -> three fixture MCP servers (subprocesses).
   BUCKET=proxy-check-$(date +%s) ./hydra.sh && uv run python proxy_check.py
-Checks: the agent sees 2 tools; calls are forwarded; a second proxy running at the same time serves but never learns; a task open when the proxy is killed is learned on the next start; a tool the agent needed but Deja didn't load is learned and loaded
+Checks: the agent sees 2 tools; calls are forwarded; a second proxy running at the same time serves but never learns; a task open when the proxy is killed is learned on the next start; after a call works, tools learned to go with it come back as likely next; a tool the agent needed but Deja didn't load is learned and loaded
 next time; a tool that keeps failing is quarantined; a tool an upstream drops is never served; memory survives a restart.
 `python proxy_check.py serve <name>` runs a fixture server."""
 import asyncio, json, os, sys, tempfile, threading, time
@@ -115,6 +115,13 @@ async def main():
         out["memory_after_restart"] = r["memory"]["past_tasks"]; out["picnic_loadout_after_restart"] = [t["name"] for t in r["tools"]]
         assert out["memory_after_restart"] == out["memory_before_restart"] + 1, out          # + the killed task, learned on start
         assert "notes-add_note" in out["picnic_loadout_after_restart"] and not os.path.exists(LOGF + ".pending")
+        r = await load(c, "Air quality index and weather forecast for Lyon")   # top-up: forecast and add_note were used together
+        out["forecast_loadout"] = [t["name"] for t in r["tools"]]
+        ok, msg = await call(c, "weather-get_forecast", {"city": "Lyon"}); assert ok
+        nxt = json.loads(msg.split("now loaded (call them with deja_call):\n")[1]) if "likely need next" in msg else []
+        out["next_tools_after_forecast"] = [t["name"] for t in nxt]
+        assert "notes-add_note" in out["forecast_loadout"] + out["next_tools_after_forecast"], out
+        assert "notes-add_note" in out["forecast_loadout"] or out["next_tools_after_forecast"][0] == "notes-add_note", out
     log = [json.loads(x) for x in open(LOGF)]
     out["log"] = {"tasks": len(log), "unserved": sum(bool(t.get("unserved")) for t in log)}; assert out["log"]["unserved"] == 1
     json.dump(out, open(os.path.join(HERE, "data/proxy_check.json"), "w"), indent=1); print(json.dumps(out, indent=1))
