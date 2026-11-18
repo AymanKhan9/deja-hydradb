@@ -1,6 +1,6 @@
 """End-to-end check of proxy.py over real stdio: an MCP client -> Deja proxy -> three fixture MCP servers (subprocesses).
   BUCKET=proxy-check-$(date +%s) ./hydra.sh && uv run python proxy_check.py
-Checks: the agent sees 2 tools; calls are forwarded; a tool the agent needed but Deja didn't load is learned and loaded
+Checks: the agent sees 2 tools; calls are forwarded; a second proxy running at the same time serves but never learns; a task open when the proxy is killed is learned on the next start; a tool the agent needed but Deja didn't load is learned and loaded
 next time; a tool that keeps failing is quarantined; a tool an upstream drops is never served; memory survives a restart.
 `python proxy_check.py serve <name>` runs a fixture server."""
 import asyncio, json, os, sys, tempfile, threading, time
@@ -101,10 +101,20 @@ async def main():
         assert not (await call(c, "weather-get_alerts", {"region": "Corsica"}))[0]
         s3 = await load(c, "Search my notes for the picnic list")
         out["memory_before_restart"] = s3["memory"]["past_tasks"]; assert out["memory_before_restart"] == s2["memory"]["past_tasks"]
+        logged = len(open(LOGF).readlines())
+        async with Client(PROXY) as c2:                          # a second session's proxy at the same time: serves, doesn't learn
+            r2 = await load(c2, "Organise a picnic in Toulouse this weekend")
+            assert (await call(c2, "weather-get_forecast", {"city": "Toulouse"}))[0]
+            await load(c2, "What's the forecast in Lille?")
+        out["second_proxy"] = {"picnic_loadout": [t["name"] for t in r2["tools"]], "tasks_it_logged": len(open(LOGF).readlines()) - logged}
+        assert "notes-add_note" in out["second_proxy"]["picnic_loadout"] and out["second_proxy"]["tasks_it_logged"] == 0, out
+    json.dump({"q": "Organise a picnic in Nantes this weekend", "calls": {"weather-get_forecast": True, "notes-add_note": True},
+               "loaded": [], "more": []}, open(LOGF + ".pending", "w"))   # as if the client killed the proxy mid-task (Claude Code does)
     async with Client(PROXY) as c:                             # restart: memory and quarantine come back from the log + graph
         r = await load(c, "Organise a picnic in Bordeaux this weekend")
         out["memory_after_restart"] = r["memory"]["past_tasks"]; out["picnic_loadout_after_restart"] = [t["name"] for t in r["tools"]]
-        assert out["memory_after_restart"] == out["memory_before_restart"] and "notes-add_note" in out["picnic_loadout_after_restart"]
+        assert out["memory_after_restart"] == out["memory_before_restart"] + 1, out          # + the killed task, learned on start
+        assert "notes-add_note" in out["picnic_loadout_after_restart"] and not os.path.exists(LOGF + ".pending")
     log = [json.loads(x) for x in open(LOGF)]
     out["log"] = {"tasks": len(log), "unserved": sum(bool(t.get("unserved")) for t in log)}; assert out["log"]["unserved"] == 1
     json.dump(out, open(os.path.join(HERE, "data/proxy_check.json"), "w"), indent=1); print(json.dumps(out, indent=1))

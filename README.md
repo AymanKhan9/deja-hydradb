@@ -76,7 +76,7 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 | Deja v1 | 38% | 30% | 45% | 42% | 49% | 50% | 51% | 54% | 55% |
 | Deja | 52% | 40% | 59% | 56% | 61% | 66% | 72% | 76% | 79% |
 
-**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool search, shuffle 1: 100–200 tasks +7, 200–400 tasks +12, 400–800 tasks +11, 800–1.6k tasks +21, 1.6k–3.2k tasks +27, 3.2k–6.4k tasks +30, 6.4k–8.6k tasks +32. Deja is level with tool search over its first 100 tasks (46% vs 45%) and ahead from the 100–200 bucket on (v4 was ahead from 100–200; the ~400 figure in the launch article was v2). 73% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling.
+**Does the gap over tool search keep widening?** It widens, then flattens. Deja minus its own base used as tool search, shuffle 1: 100–200 tasks +7, 200–400 tasks +12, 400–800 tasks +11, 800–1.6k tasks +21, 1.6k–3.2k tasks +27, 3.2k–6.4k tasks +30, 6.4k–8.6k tasks +32. Deja is level with tool search over its first 100 tasks (46% vs 45%) and ahead from the 100–200 bucket on (v4 was ahead from 100–200; the ~400 figure in the launch article was v2). 73% of the remaining misses are tools memory already has but ranks too low, so ranking, not coverage, is the next ceiling. But "in memory" doesn't mean the neighbours found it: for 39% of those misses (served model, after 400 tasks) no similar past task or step voted for the tool at all, and the median missed tool sits at rank 40 when about 16 tools fit. A reader (@OctoHallHQ) suggested weighting each past task's votes by whether that task succeeded. Toucan has an LLM judge's completeness score (1–5) for every task, so `success_weight.py` tried it on the served model: 76.2% as served, 75.4% with votes × score/5, 74.6% dropping tasks scored ≤ 2, 75.8% dropping only 1s. Votes already come only from calls that worked; a likely reason is that a low score marks an answer that fell short, not wrong tools, so down-weighting those tasks discards good evidence.
 
 **Does the lead need near-duplicates?** Toucan's questions recur by construction, so here is accuracy by how similar the
 closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
@@ -254,19 +254,35 @@ worked is logged as unserved. The catalog is re-read from every upstream's `tool
 synced to `(:Catalog)-[:LISTS]->(:Tool)`, so a dropped tool is never loaded again. Memory survives restarts (the graph,
 plus a task log the in-memory mirror is rebuilt from).
 
-`proxy_check.py` runs it end to end over real stdio (a scripted MCP client → `proxy.py` → three fixture MCP servers as subprocesses, HydraDB underneath, 110-token budget so loadouts have to choose): the agent sees 2 tools; a picnic task first got `calendar-list_events, weather-get_forecast`, the agent needed a note each time, and after 3 such tasks the loadout was `notes-add_note, weather-get_forecast`; a tool that failed 5 times in a row was quarantined (`weather-get_alerts`) and left out of the next loadout; after an upstream dropped `notes-search_notes` it was neither loaded nor listed, and calling it fails; a task where nothing worked was logged as unserved; and after a restart memory came back with 8 tasks and the same picnic loadout. Smoke-tested in front of real servers too (`mcp-server-time`, `@modelcontextprotocol/server-everything`: 25 tools, a forwarded call, the task learned).
+`proxy_check.py` runs it end to end over real stdio (a scripted MCP client → `proxy.py` → three fixture MCP servers as subprocesses, HydraDB underneath, 110-token budget so loadouts have to choose): the agent sees 2 tools; a picnic task first got `calendar-list_events, weather-get_forecast`, the agent needed a note each time, and after 3 such tasks the loadout was `notes-add_note, weather-get_forecast`; a tool that failed 5 times in a row was quarantined (`weather-get_alerts`) and left out of the next loadout; after an upstream dropped `notes-search_notes` it was neither loaded nor listed, and calling it fails; a task where nothing worked was logged as unserved; a second proxy started alongside (a second session) served the learned picnic loadout and logged 0 tasks; and after a restart memory came back with 9 tasks (the 8 before, plus a task left open as if the client had killed the proxy) and the same picnic loadout.
+
+**In Claude Code**, in front of eight real servers (time, fetch, git, memory, sequential thinking, Context7, Playwright,
+DeepWiki: 58 tools). Two things the fixture test couldn't show, both now fixed:
+
+- Claude Code defers MCP tools behind its tool search, so Claude first sees only the server's instructions. When they
+  said just "call deja_load_tools first", Claude used its built-in WebFetch instead. Now the instructions and the tool
+  description name the servers behind Deja. In the three tasks since, Claude used Deja after WebFetch was rate-limited,
+  went straight to Deja when the task named DeepWiki, and answered "the time in Tokyo" with its own `date`, which is
+  fine: Deja is for what the built-in tools don't cover.
+- Claude Code kills its MCP servers on exit, so a task learned "when the next one starts or on shutdown" was lost at
+  the end of each session. Now the open task is written to disk after every call and learned on the next start.
+
+Startup: Claude Code gets an answer in ~7 s; the upstreams start concurrently in the background (~14 s for these
+eight), and the first `deja_load_tools` waits for them. Tool and task embeddings are cached on disk, so only the first
+start pays for embedding long tool descriptions.
 
 ```bash
 BUCKET=deja-proxy ./hydra.sh
 cp upstreams.example.json upstreams.json          # your servers, in the usual mcpServers format (command/args/env or url)
-claude mcp add deja -- uv run --directory "$PWD" python proxy.py upstreams.json      # or any MCP client, over stdio
+claude mcp add -s user deja -e DEJA_RAMP=20 -e DEJA_BUDGET=1000 -- uv run --directory "$PWD" python proxy.py upstreams.json
+# or any MCP client, over stdio. RAMP/BUDGET suit a ~60-tool catalog; the defaults (400, 2000) were fit on Toucan's 2,236.
 ```
 
 What it doesn't do yet: memory starts empty (Toucan's memory doesn't transfer, the tool names differ), and memory's
 weight ramps up over the first `DEJA_RAMP` tasks (400, fit on Toucan's 2,236-tool catalog; a small catalog can use far
 fewer); the abstain rule isn't applied, because it was fit on Toucan and would abstain on everything while memory is
-empty; it serves one client at a time; and nobody has run real agents through it yet, so there are no real-traffic
-numbers. Exposing loaded tools natively (via `tools/list_changed`) instead of through `deja_call` is also left out:
+empty; only one proxy learns at a time (a second session's proxy serves loadouts but doesn't learn); and it has seen a
+handful of real Claude Code tasks, not enough for real-traffic numbers. Exposing loaded tools natively (via `tools/list_changed`) instead of through `deja_call` is also left out:
 client support for refreshing tools mid-session varies.
 
 ## Limitations
@@ -331,6 +347,7 @@ uv run --with matplotlib python charts.py docs/img
 uv run python server.py             # bulk-load graph, held-out check, page + /api/loadout on :8090
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
 uv run python proxy_check.py        # the MCP proxy end to end (needs HydraDB up) -> data/proxy_check.json
+uv run python success_weight.py     # votes weighted by Toucan's judge score; why in-memory misses happen -> data/success_weight.json
 uv run python make_readme.py        # regenerate this README's tables from the results
 ```
 

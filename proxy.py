@@ -14,7 +14,8 @@ to (:Catalog)-[:LISTS]->(:Tool), so a tool an upstream drops is never loaded aga
   uv run python proxy.py upstreams.json                # stdio MCP server; upstreams in the usual mcpServers format
 State: the graph in HydraDB, plus data/proxy_tasks.jsonl (the task log the in-memory mirror is rebuilt from on start).
 """
-import contextlib, hashlib, json, math, os, re, sys
+import contextlib, fcntl, hashlib, json, math, os, re, sys, time
+import anyio
 import numpy as np
 from mcp import Client, StdioServerParameters
 from mcp.server.mcpserver import MCPServer
@@ -27,6 +28,8 @@ import retr
 from hydra_store import HydraLearned, hid, write_catalog, remove_tool, META
 
 LOG = os.environ.get("DEJA_LOG", "data/proxy_tasks.jsonl")
+PENDING = LOG + ".pending"                                         # the open task, saved after every call: clients may kill the proxy
+VECS = "data/proxy_tool_vecs.npz"                                 # tool embeddings by text hash: restarts skip re-embedding
 BUDGET, LISTED = int(os.environ.get("DEJA_BUDGET", 2000)), int(os.environ.get("DEJA_LISTED", 10))
 retr.Learned.OUTCOME = True
 log = lambda *a: print(*a, file=sys.stderr, flush=True)       # stdout is the MCP channel
@@ -40,25 +43,38 @@ class Deja:
     def __init__(s):
         from fastembed import TextEmbedding
         s.emb_model = retr.EMB = TextEmbedding("BAAI/bge-small-en-v1.5", threads=2)   # shared with retr's step embeddings
-        s.ups, s.cat, s.names, s.TE, s.vec_cache, s.cur = {}, {}, [], np.zeros((0, 384), np.float32), {}, None
-        s.L = HydraLearned(); s.qrows = []
+        s.ups, s.cat, s.names, s.TE, s.cur = {}, {}, [], np.zeros((0, 384), np.float32), None
+        s.vec_cache = dict(np.load(VECS)) if os.path.exists(VECS) else {}; s.up = anyio.Event()
+        s.L = HydraLearned(); s.qrows = []; s.lock = open(LOG + ".lock", "w")
+        try: fcntl.flock(s.lock, fcntl.LOCK_EX | fcntl.LOCK_NB); s.learns = True
+        except BlockingIOError: s.learns = False                          # another session's proxy is learning: serve, don't write
         s.tasks = [json.loads(x) for x in open(LOG)] if os.path.exists(LOG) else []
         mem = [t for t in s.tasks if not t.get("unserved")]
-        s.qrows = list(s.embed([t["q"] for t in mem])) if mem else []; retr.Learned.Q = np.array(s.qrows).reshape(-1, 384)
+        s.qrows = list(s.cached([t["q"] for t in mem])); retr.Learned.Q = np.array(s.qrows).reshape(-1, 384)
         for t in mem: t.update(gold=set(t["gold"]), gold_ok=set(t["gold_ok"]), failed=set(t["failed"]))
         HydraLearned.tool_names = {hid("tool", g): g for t in mem for g in t["gold"]}   # memory can name tools that left the catalog
         n = (s.L.db.q("MATCH (m:Meta {id: $id}) RETURN m.n_tasks AS n", id=META) or [{"n": 0}])[0]["n"]
-        if n == len(mem):                                                       # graph already holds them: rebuild the mirror only
+        if n == len(mem) or (not s.learns and n > len(mem)):                                                       # graph already holds them: rebuild the mirror only
             for t in s.tasks:
                 if t.get("unserved"): [s.L.recent[g].append(0) for g in t["failed"]]
                 else: retr.Learned.ingest(s.L, t)
-        elif n == 0: s.L.bulk_load(mem)            # fresh graph: write the log into it (ponytail: unserved failures not replayed here)
+        elif n == 0 and s.learns: s.L.bulk_load(mem)            # fresh graph: write the log into it (ponytail: unserved failures not replayed here)
         else: raise SystemExit(f"graph has {n} tasks, log has {len(mem)}: start HydraDB on a fresh BUCKET")
-        log(f"deja proxy: {len(mem)} past tasks in memory ({len(s.tasks) - len(mem)} unserved logged)")
+        if s.learns and os.path.exists(PENDING):                       # killed mid-task last time: learn that task now
+            c = json.load(open(PENDING)); HydraLearned.tool_names.update({hid("tool", g): g for g in c["calls"]})
+            s.cur = dict(c, qvec=s.embed([c["q"]])[0], more=set(c["more"])); s.finish()
+        log(f"deja proxy: {len(s.qrows)} past tasks in memory ({len(s.tasks) - len(mem)} unserved logged)"
+            + ("" if s.learns else "; another Deja proxy is learning, this one only serves"))
 
     def embed(s, texts):
         E = np.array(list(s.emb_model.embed(texts)), dtype=np.float32)
         return E / np.linalg.norm(E, axis=1, keepdims=True)
+
+    def cached(s, texts):
+        """Embeddings by text hash, kept in VECS across restarts."""
+        keys = [hashlib.sha1(t.encode()).hexdigest() for t in texts]; new = sorted({k: t for k, t in zip(keys, texts) if k not in s.vec_cache}.items())
+        if new: s.vec_cache.update(zip((k for k, _ in new), s.embed([t for _, t in new]))); np.savez(VECS, **s.vec_cache)
+        return np.array([s.vec_cache[k] for k in keys], np.float32).reshape(-1, 384)
 
     async def refresh(s):
         """Re-read every upstream's tools/list and sync the graph's catalog to it."""
@@ -79,9 +95,7 @@ class Deja:
         for n in sorted(before - set(cat)): remove_tool(s.L.db, n)
         if set(cat) != set(s.cat) or any(cat[n]["text"] != s.cat[n]["text"] for n in cat):
             s.cat = cat; s.names = sorted(cat); s.nix = {n: k for k, n in enumerate(s.names)}
-            new = [n for n in s.names if cat[n]["text"] not in s.vec_cache]
-            if new: s.vec_cache.update(zip((cat[n]["text"] for n in new), s.embed([cat[n]["text"] for n in new])))
-            s.TE = np.array([s.vec_cache[cat[n]["text"]] for n in s.names]).reshape(-1, 384)
+            s.TE = await anyio.to_thread.run_sync(s.cached, [cat[n]["text"] for n in s.names])   # off the loop: long descriptions are slow on CPU
             retr._BM = retr.BM25(cat, s.names); retr._LT = {n: math.log(cat[n]["tokens"]) for n in cat}
             HydraLearned.tool_names.update({hid("tool", n): n for n in cat})
             log(f"catalog: {len(cat)} tools from {len(s.ups)} servers")
@@ -89,7 +103,7 @@ class Deja:
     def finish(s):
         """End the current task and learn from it."""
         c, s.cur = s.cur, None
-        if not c or not c["calls"] or c["qvec"] is None: return        # calls made without a task teach nothing
+        if not s.learns or not c or not c["calls"] or c["qvec"] is None: return        # calls made without a task teach nothing
         ok = {n for n, v in c["calls"].items() if v}
         t = {"i": len(s.qrows), "q": c["q"], "gold": set(c["calls"]), "gold_ok": ok, "failed": set(c["calls"]) - ok, "flows": [],
              "loaded": c["loaded"], "asked_for_more": sorted(c["more"])}
@@ -98,10 +112,12 @@ class Deja:
         else: t["unserved"] = True; s.L.record_failures(t)            # nothing worked: logged, teaches no tool, failures still count
         s.tasks.append(t)
         with open(LOG, "a") as f: f.write(json.dumps({k: sorted(v) if isinstance(v, set) else v for k, v in t.items()}) + "\n")
+        if os.path.exists(PENDING): os.remove(PENDING)
 
     def full(s, n): return {"name": n, "description": s.cat[n]["description"], "input_schema": s.cat[n]["schema"]}
 
     async def load(s, task, more):
+        await s.up.wait()                                               # upstreams still starting: wait, don't fail
         if more and s.cur and task.strip() in ("", s.cur["q"]):          # load listed tools into the current task
             got = [n for n in more if n in s.cat]; s.cur["more"] |= set(got) - set(s.cur["loaded"])
             return {"tools": [s.full(n) for n in got], "unknown": [n for n in more if n not in s.cat]}
@@ -118,6 +134,7 @@ class Deja:
                 "how": "Call a tool with deja_call(tool, arguments). To use a listed tool, call deja_load_tools with the same task and more=[names]."}
 
     async def call(s, tool, arguments):
+        await s.up.wait()
         if tool not in s.cat: raise ToolError(f"unknown tool {tool!r}: call deja_load_tools first")
         if s.cur is None: s.cur = {"q": "", "qvec": None, "calls": {}, "loaded": [], "more": set()}
         c = s.cat[tool]
@@ -125,31 +142,46 @@ class Deja:
         except Exception as e:                                         # protocol-level failure counts as a failed call
             s.cur["calls"][tool] = s.cur["calls"].get(tool, False); raise ToolError(f"{type(e).__name__}: {e}")
         s.cur["calls"][tool] = s.cur["calls"].get(tool, False) or not r.is_error
+        if s.learns and s.cur["q"]:
+            json.dump({k: sorted(v) if isinstance(v, set) else v for k, v in s.cur.items() if k != "qvec"}, open(PENDING, "w"))
         text = "\n".join(getattr(b, "text", None) or f"[{b.type} content]" for b in r.content) or json.dumps(r.structured_content)
         if r.is_error: raise ToolError(text)
         return text
 
 D = None
 
+async def hold(name, spec, ready, stop):
+    """Connect one upstream and keep it open until shutdown. A server that fails to start is skipped, not fatal."""
+    target = spec["url"] if "url" in spec else StdioServerParameters(command=spec["command"], args=spec.get("args", []), env=spec.get("env"))
+    try:
+        async with Client(target) as c:
+            D.ups[name] = c; ready.set(); await stop.wait()
+    except Exception as e: log(f"upstream {name} failed: {type(e).__name__}: {e}")
+    finally: D.ups.pop(name, None); ready.set()
+
 @contextlib.asynccontextmanager
 async def lifespan(server):
     global D
-    D = Deja()
-    async with contextlib.AsyncExitStack() as stack:
-        for name, spec in json.load(open(CONFIG))["mcpServers"].items():
-            target = spec["url"] if "url" in spec else StdioServerParameters(command=spec["command"], args=spec.get("args", []), env=spec.get("env"))
-            D.ups[name] = await stack.enter_async_context(Client(target))
-        await D.refresh()
+    D = Deja(); t0 = time.time(); stop = anyio.Event(); specs = json.load(open(CONFIG))["mcpServers"]
+    ready = {n: anyio.Event() for n in specs}
+    async def start():                         # in the background: the client's initialize is answered at once (clients time out)
+        for e in ready.values(): await e.wait()
+        await D.refresh(); D.up.set(); log(f"{len(D.ups)}/{len(specs)} upstreams up in {time.time() - t0:.1f}s")
+    async with anyio.create_task_group() as tg:                        # upstreams start concurrently (npx/uvx take ~7 s each)
+        for n, spec in specs.items(): tg.start_soon(hold, n, spec, ready[n], stop)
+        tg.start_soon(start)
         try: yield None
-        finally: D.finish()                                            # the last task is learned on shutdown
+        finally: D.finish(); stop.set()                                # the last task is learned on shutdown
 
+SERVERS = ", ".join(json.load(open(CONFIG))["mcpServers"])        # named up front: clients that defer MCP tools only show this text
 mcp = MCPServer("deja", lifespan=lifespan, instructions=(
-    "Before using tools for a task, call deja_load_tools with the user's task. It returns the tools you need; call them with deja_call."))
+    f"Deja holds the tools of these MCP servers: {SERVERS}. When a task could use one of them, call deja_load_tools with the "
+    "user's task first: it returns the tools that fit. Then call them with deja_call."))
 
-@mcp.tool()
+@mcp.tool(description=f"""Get the tools for a task from these MCP servers: {SERVERS}. Call this first with the user's task, in their
+words. Returns full definitions of the tools to use and a short list of other relevant tools; pass the same task with
+more=[names] to load listed ones.""")
 async def deja_load_tools(task: str, more: list[str] | None = None) -> str:
-    """Get the tools for a task. Call this first with the user's task, in their words. Returns full definitions of the
-    tools to use and a short list of other relevant tools; pass the same task with more=[names] to load listed ones."""
     return json.dumps(await D.load(task, more or []))   # ponytail: HydraDB and embedding calls block the loop; one client at a time
 
 @mcp.tool()
