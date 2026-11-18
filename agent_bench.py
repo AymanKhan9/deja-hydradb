@@ -102,14 +102,15 @@ def one(k, arm, model=None):
             "first_ok": bool(called) and called[0] in ok, "all_ok_called": ok <= set(called), "n_calls": len(called),
             "n_toolsearch": sum(u == "ToolSearch" for u in uses), "turns": res.get("num_turns"), "usage": res.get("usage"),
             "cost_usd_notional": res.get("total_cost_usd"), "subtype": res.get("subtype"), "secs": round(time.time() - t0, 1),
-            "called": called, "multi": task["multi"], "error": None if ev else p.stderr[-500:]}
+            "called": called, "multi": task["multi"],
+            "error": (None if ev else p.stderr[-500:]) or (str(res.get("result"))[:300] if res.get("is_error") and res.get("subtype") == "success" else None)}
 
 def run(n, arms=ARMS, par=3, model=None):
     done = {(r["k"], r["arm"]) for r in map(json.loads, open(RUNS))} if os.path.exists(RUNS) else set()
     jobs = [(k, a) for k in range(n) for a in arms if (k, a) not in done]
     with concurrent.futures.ThreadPoolExecutor(par) as ex:
         for r in ex.map(lambda j: one(*j, model=model), jobs):
-            if r["error"] or r["subtype"] is None: print("FAILED", r["k"], r["arm"], r["error"], flush=True); continue
+            if r["error"] or r["subtype"] is None: print("FAILED", r["k"], r["arm"], r["error"], flush=True); continue   # e.g. usage limit: rerun resumes
             with open(RUNS, "a") as f: f.write(json.dumps(r) + "\n")
             print(r["k"], r["arm"], r["model"], "first_ok", r["first_ok"], "all_ok", r["all_ok_called"], "calls", r["n_calls"],
                   "turns", r["turns"], "$", r["cost_usd_notional"], f"{r['secs']}s", flush=True)
