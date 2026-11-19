@@ -137,7 +137,14 @@ def report():
                           "tool_calls": sum(r["n_calls"] for r in S) / len(S), "toolsearch_calls": sum(r["n_toolsearch"] for r in S) / len(S),
                           "turns": sum(r["turns"] or 0 for r in S) / len(S), "input_tokens": sum(tok) / len(S),
                           "output_tokens": sum((r["usage"] or {}).get("output_tokens", 0) for r in S) / len(S),
-                          "cost_usd_notional": sum(r["cost_usd_notional"] or 0 for r in S) / len(S), "secs": sum(r["secs"] for r in S) / len(S)}
+                          "cost_usd_notional": sum(r["cost_usd_notional"] or 0 for r in S) / len(S)}
+    rng, out["paired"] = random.Random(0), {}                     # paired bootstrap over tasks, 95% CI in points
+    for m in ("all_ok_twin", "first_ok_twin"):
+        for a, b in (("deja", "search"), ("memory", "search"), ("deja", "memory")):
+            by = {(r["k"], r["arm"]): r[m] for r in R}; d = [by[k, a] - by[k, b] for k in ks]
+            bs = sorted(sum(rng.choice(d) for _ in d) / len(d) for _ in range(2000))
+            out["paired"][f"{m}:{a}-{b}"] = {"diff": sum(d) / len(d), "ci95": [bs[50], bs[1949]]}
+    out["incomplete_tasks"] = sorted(set(range(len(T))) - set(ks))
     json.dump(out, open("data/bench.json", "w"), indent=1); print(json.dumps(out, indent=1))
 
 if __name__ == "__main__":

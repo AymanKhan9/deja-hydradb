@@ -137,6 +137,7 @@ if __name__ == "__main__":
     for k in ("outcome", "lifecycle", "load", "analysis_v5", "catalog_check"):
         if os.path.exists(f"data/{k}.json"): R[k.split("_")[0]] = json.load(open(f"data/{k}.json"))
     R.get("lifecycle", {}).pop("scenario_cases", None)
+    if os.path.exists("data/bench.json"): R["bench"] = json.load(open("data/bench.json"))
     if os.path.exists("data/agent_check.json"): R["agent"] = {k: v for k, v in json.load(open("data/agent_check.json")).items() if k != "rows"}
     R["abstain"] = {k: v for k, v in AB.items() if k != "setup"} | {"setup": AB["setup"], "served_threshold": THR}
     R["hydra"] = holdout_check()

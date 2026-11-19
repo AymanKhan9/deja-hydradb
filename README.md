@@ -56,9 +56,7 @@ and tool search get the same changes** (step votes for memory-only, the length p
 measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
 than in v4.
 
-Paired over shuffle 1, Deja minus memory-only is **+0.81 points (95% bootstrap CI +0.48 to +1.16)**, and +0.91 on multi-server tasks (+0.19 to +1.67); Deja alone gets 148 tasks right that memory-only misses, against 78 the other way.
-
-**So the graph's own ranking gain is small, and further ranking ideas haven't widened it** (a session top-up and substitute edges below both help memory-only nearly as much). The large gain is learned tool memory over tool search. What the graph adds is that the memory, every call's outcome, the quarantine and the live catalog sit in one store that the server, the learner and any number of planners read and write together: so loadouts carry a chronically broken tool far less often, a removed tool is never served, and new tasks are visible to every process as they are learned.
+<function <lambda> at 0x765351fb2ca0>
 
 **Where Deja still misses** (shuffle 1, 2,289 misses): 4% need more tools than fit in 2,000 tokens, 24% need a tool that no past task has used yet, and 73% had every tool in memory but ranked it too low. On the 10% of tasks that need a never-used tool, Deja gets 38.1% against 41.0% for its own base alone: memory can't help with a tool it has never seen. The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
 HydraDB reads on the held-out set and in `python hydra_store.py`, which also checks the per-task learning path: bulk-load
@@ -243,6 +241,18 @@ Every number above is "the right tools were in the loadout". To check that this 
 
 Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was better on 41 tasks and worse on 3, at the same prompt size. 2 of 398 requests failed on the provider's credit limit and count as misses for both. One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success. This check ran on the v4 loadouts, before step recall and the length penalty; it hasn't been re-run on v5.
 
+**Whole tasks in Claude Code** (`agent_bench.py`). Claude Code (`claude -p`, Opus 5.5, on a Claude Pro account) ran 192 held-out tasks to the end, three ways: with Deja's loadout, with the memory-only loadout, and with all 2,236 tools behind one MCP server so Claude Code defers them and Claude finds them with its own tool search. Tools aren't live: a stub server plays back each tool's output from the recorded run. Scored on whether Claude called every tool that worked in the recorded run, counting a call to a near-twin (tool-tool cosine ≥ 0.80; Toucan has the same tool on several servers) as covering it.
+
+| | Deja | Memory only | Claude Code's tool search |
+|---|---|---|---|
+| Called every tool that worked (or a near-twin) | 82.3% | **83.9%** | 72.4% |
+| Same, exact tool name only | 62.0% | **63.0%** | 49.5% |
+| First tool call worked | 79.2% | **79.7%** | 76.0% |
+| Input tokens per task | **23,635** | 23,772 | 304,105 |
+| Cost per task at API prices | $0.085 | **$0.080** | $0.545 |
+
+Paired over tasks: Deja vs Claude Code's tool search on calling every needed tool, +9.9 points, 95% CI +4.7 to +15.1; memory only vs tool search, +11.5 points, 95% CI +6.2 to +16.7; Deja vs memory only, -1.6 points, 95% CI -4.7 to +1.0. On the first call the gap over tool search is smaller and not significant (+3.1 points, 95% CI -2.1 to +8.3). A preloaded loadout gets Claude to the needed tools more often, at about a thirteenth of the input tokens (Claude Code's deferred-tool list carries every tool name on every turn), and Deja's graph adds nothing here over memory alone, matching the offline result. 7 of 199 tasks are left out because Opus 5.5's safeguards blocked at least one arm's run (false positives that persisted on retry). One model, one run, recorded outputs.
+
 ## Use it with your agent: the MCP proxy
 
 `proxy.py` is an MCP server that sits in front of your real MCP servers and learns from your agent's traffic, into
@@ -363,6 +373,7 @@ uv run python server.py             # bulk-load graph, held-out check, page + /a
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
 uv run python proxy_check.py        # the MCP proxy end to end (needs HydraDB up) -> data/proxy_check.json
 uv run python success_weight.py     # votes weighted by Toucan's judge score; why in-memory misses happen -> data/success_weight.json
+uv run python agent_bench.py prep && uv run python agent_bench.py run 199 && uv run python agent_bench.py report   # Claude Code, 3 arms -> data/bench.json
 uv run python make_readme.py        # regenerate this README's tables from the results
 ```
 

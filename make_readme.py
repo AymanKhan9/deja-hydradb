@@ -89,6 +89,29 @@ if AG:
              f"One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success. "
              f"This check ran on the v4 loadouts, before step recall and the length penalty; it hasn't been re-run on v5.")
 else: agent = ""
+BN = json.load(open("data/bench.json")) if os.path.exists("data/bench.json") else {}
+if BN:
+    d_, m_, s_ = (BN["arms"][a] for a in ("deja", "memory", "search")); P = BN["paired"]
+    ci = lambda k: f"{100*P[k]['diff']:+.1f} points, 95% CI {100*P[k]['ci95'][0]:+.1f} to {100*P[k]['ci95'][1]:+.1f}"
+    agent += (f"\n\n**Whole tasks in Claude Code** (`agent_bench.py`). Claude Code (`claude -p`, Opus 5.5, on a Claude Pro account) ran "
+              f"{BN['tasks']} held-out tasks to the end, three ways: with Deja's loadout, with the memory-only loadout, and with all "
+              f"2,236 tools behind one MCP server so Claude Code defers them and Claude finds them with its own tool search. "
+              f"Tools aren't live: a stub server plays back each tool's output from the recorded run. Scored on whether Claude "
+              f"called every tool that worked in the recorded run, counting a call to a near-twin (tool-tool cosine ≥ 0.80; "
+              f"Toucan has the same tool on several servers) as covering it.\n\n"
+              f"| | Deja | Memory only | Claude Code's tool search |\n|---|---|---|---|\n"
+              f"| Called every tool that worked (or a near-twin) | {100*d_['all_worked_tools_called']:.1f}% | **{100*m_['all_worked_tools_called']:.1f}%** | {100*s_['all_worked_tools_called']:.1f}% |\n"
+              f"| Same, exact tool name only | {100*d_['all_worked_tools_called_exact_name']:.1f}% | **{100*m_['all_worked_tools_called_exact_name']:.1f}%** | {100*s_['all_worked_tools_called_exact_name']:.1f}% |\n"
+              f"| First tool call worked | {100*d_['first_call_worked']:.1f}% | **{100*m_['first_call_worked']:.1f}%** | {100*s_['first_call_worked']:.1f}% |\n"
+              f"| Input tokens per task | **{d_['input_tokens']:,.0f}** | {m_['input_tokens']:,.0f} | {s_['input_tokens']:,.0f} |\n"
+              f"| Cost per task at API prices | ${d_['cost_usd_notional']:.3f} | **${m_['cost_usd_notional']:.3f}** | ${s_['cost_usd_notional']:.3f} |\n\n"
+              f"Paired over tasks: Deja vs Claude Code's tool search on calling every needed tool, {ci('all_ok_twin:deja-search')}; "
+              f"memory only vs tool search, {ci('all_ok_twin:memory-search')}; Deja vs memory only, {ci('all_ok_twin:deja-memory')}. "
+              f"On the first call the gap over tool search is smaller and not significant ({ci('first_ok_twin:deja-search')}). "
+              f"A preloaded loadout gets Claude to the needed tools more often, at about a thirteenth of the input tokens "
+              f"(Claude Code's deferred-tool list carries every tool name on every turn), and Deja's graph adds nothing here over "
+              f"memory alone, matching the offline result. {len(BN['incomplete_tasks'])} of 199 tasks are left out because Opus 5.5's "
+              f"safeguards blocked at least one arm's run (false positives that persisted on retry). One model, one run, recorded outputs.")
 KEY = "abstain_recall_unanswerable"
 def un_table():
     rows = ["| Allowed wrong abstentions (fit on seed 1) | Shipped rule: caught | Unserved memory: caught, gap repeats | Unserved memory: caught, new gaps only | Combined rule: caught, repeats / new | Combined: wrongly abstained | Combined: caught among first 20 unserved |",
@@ -472,6 +495,7 @@ uv run python server.py             # bulk-load graph, held-out check, page + /a
 ./deploy.sh ubuntu@<vm>             # Ubuntu VM (x86_64 or arm64), opens port 80
 uv run python proxy_check.py        # the MCP proxy end to end (needs HydraDB up) -> data/proxy_check.json
 uv run python success_weight.py     # votes weighted by Toucan's judge score; why in-memory misses happen -> data/success_weight.json
+uv run python agent_bench.py prep && uv run python agent_bench.py run 199 && uv run python agent_bench.py report   # Claude Code, 3 arms -> data/bench.json
 uv run python make_readme.py        # regenerate this README's tables from the results
 ```
 
