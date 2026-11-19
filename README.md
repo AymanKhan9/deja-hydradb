@@ -6,7 +6,7 @@
 
 Agents now sit in front of hundreds or thousands of MCP tools. Preloading them all burns the context window, and plain
 tool search over descriptions misses the tools a task *actually* ends up calling, especially the second server a task
-needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sharper with every task it serves.**
+needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sharper with every task it serves.** That memory (similar past tasks vote for the tools that worked for them) is what beats tool search: +9.9 points over Claude Code's own tool search on whole tasks, at a thirteenth of the tokens. The rest of the graph (word and co-use hops, failed calls, quarantine, the live catalog) adds about a point to ranking; its job is keeping that memory correct and shared as tools fail and change.
 
 ## Results
 
@@ -26,18 +26,19 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 | **Tool search: Deja's base alone** (cosine + 0.15 · BM25) | 46.1% | 30.0% |
 | Load whole servers, vector-ranked | 43.5% | 12.6% |
 | Vector + learned popularity (non-graph learner) | 43.0–43.5% | 22.8–24.6% |
-| **Past-task memory, no graph** (same base; the 20 nearest past tasks to the task and to each of its steps vote) | 71.7–72.6% | 49.4–50.5% |
+| **Deja, votes only** (same base; the 20 nearest past tasks to the task and to each of its steps vote for the tools they used; no graph hops) | 71.7–72.6% | 49.4–50.5% |
 | Deja v1, first shipped: word + co-use edges, no task memory | 52.4–53.2% | 27.3–28.4% |
 | **Deja**: hybrid base + task and step memory in HydraDB + co-use hop + word hop | 72.3–73.4% | 49.6–51.4% |
 | Deja without word edges (ablation) | 72.1–73.1% | 49.0–50.5% |
 | Deja without co-use edges (ablation) | 72.0–73.0% | 50.2–51.4% |
-| *v4 for reference (before step recall and the length penalty)*: tool search / memory-only / Deja | 43.6% / 68.1–68.7% / 70.4–70.9% | 27.2% / 42.2–43.4% / 45.4–45.8% |
+| *v4 for reference (before step recall and the length penalty)*: tool search / votes only / Deja | 43.6% / 68.1–68.7% / 70.4–70.9% | 27.2% / 42.2–43.4% / 45.4–45.8% |
 
 **Held out, live from HydraDB:** on 200 tasks the served graph never learned from (all answerable), every tool that worked was in the first loadout for **81.4%** vs tool search 47.2%; loadouts carried a chronically broken tool 0.0% of the time vs 56.5% for tool search. The served policy answered with Deja on 198 and abstained on 2. Graph reads per loadout p50 115 ms / p95 201 ms. Every served decision and loadout is identical to the in-memory twin (`matches_oracle: True`).
 
-**Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
-graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
-`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth 0.9 points overall and
+**Read this table honestly.** Memory of past tasks does most of the work. Deja keeps it in HydraDB as
+`(:Task)-[:USED]->(:Tool)`, and the 20 nearest past tasks vote for the tools they used. **Deja, votes only** is that
+memory alone, a one-step lookup, and it gets most of the lift over tool search. The full model adds two multi-step graph
+reads, a word hop and a co-use hop, worth 0.9 points overall and
 0.7 on multi-server tasks (means over the 4 orderings; see the ablation rows for each hop). Our first shipped version (v1) had no task memory and lost to this baseline. A reviewer added the
 baseline, we reproduced it, and we rebuilt around it. The v1 row stays in the table.
 
@@ -50,13 +51,13 @@ v1. **v5 (from a reviewer's analysis, reproduced here):** each step of a multi-s
 recalls its own 20 nearest past tasks, which vote the same way, and a tool keeps its best step vote (weight 0.5, tried
 0.25–1.0); and every ranked method subtracts 0.05 · ln(tokens) so a long schema has to earn its space (tried 0.02–0.2).
 We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **Cold-start ramp:** memory's
-weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for memory-only too; 400 was best of
-50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **The memory-only baseline
-and tool search get the same changes** (step votes for memory-only, the length penalty for both), so the graph's gain is
-measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
+weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for votes only too; 400 was best of
+50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **Votes only
+and tool search get the same changes** (step votes for votes only, the length penalty for both), so the graph's gain is
+measured like for like; both changes lift votes only nearly as much as Deja, which is why the hops' margin is smaller
 than in v4.
 
-<function <lambda> at 0x765351fb2ca0>
+<function <lambda> at 0x7b21ec3b2a20>
 
 **Where Deja still misses** (shuffle 1, 2,289 misses): 4% need more tools than fit in 2,000 tokens, 24% need a tool that no past task has used yet, and 73% had every tool in memory but ranked it too low. On the 10% of tasks that need a never-used tool, Deja gets 38.1% against 41.0% for its own base alone: memory can't help with a tool it has never seen. The stream numbers use an in-memory twin of exactly the served model; the twin is checked equal to
 HydraDB reads on the held-out set and in `python hydra_store.py`, which also checks the per-task learning path: bulk-load
@@ -72,7 +73,7 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 |---|---|---|---|---|---|---|---|---|---|
 | Tool search (vector) | 34% | 30% | 38% | 38% | 41% | 36% | 37% | 38% | 38% |
 | Tool search (Deja's base) | 48% | 42% | 52% | 44% | 50% | 46% | 45% | 46% | 47% |
-| Past-task memory, no graph | 52% | 40% | 58% | 55% | 62% | 65% | 71% | 75% | 78% |
+| Deja, votes only | 52% | 40% | 58% | 55% | 62% | 65% | 71% | 75% | 78% |
 | Deja v1 | 38% | 30% | 45% | 42% | 49% | 50% | 51% | 54% | 55% |
 | Deja | 52% | 40% | 59% | 56% | 61% | 66% | 72% | 76% | 79% |
 
@@ -82,7 +83,7 @@ HydraDB reads on the held-out set and in `python hydra_store.py`, which also che
 closest past task was (shuffle 1, tasks after the first 400). For scale: "List my open GitHub issues" and a past task
 about trending GitHub repositories are 0.76 similar.
 
-| Closest past task similarity | Tasks (shuffle 1) | Tool search | Memory-only | Deja | Deja's lead over tool search |
+| Closest past task similarity | Tasks (shuffle 1) | Tool search | Votes only | Deja | Deja's lead over tool search |
 |---|---|---|---|---|---|
 | 0.00-0.70 | 60 | 30.0% | 50.0% | 50.0% | +20.0 |
 | 0.70-0.80 | 1,548 | 35.5% | 58.3% | 59.2% | +23.7 |
@@ -96,7 +97,7 @@ about trending GitHub repositories are 0.76 similar.
 |---|---|---|---|
 | Tool search (vector) | 26.5% | 37.4% | 48.2% |
 | Tool search (Deja's base) | 32.0% | 46.1% | 59.3% |
-| Past-task memory, no graph | 56.4% | 72.6% | 82.2% |
+| Deja, votes only | 56.4% | 72.6% | 82.2% |
 | Deja | 57.1% | 73.4% | 83.2% |
 
 ### Learning only from calls that worked
@@ -112,9 +113,9 @@ only successes vote or count. Mean of 3 shuffles; "chronically broken" = fails i
 |---|---|---|---|
 | Tool search (vector) | 40.0% | 37.4% | 35.0% |
 | Tool search (Deja's base) | 49.0% | 46.1% | 50.1% |
-| Past-task memory, learning from every call | 74.4% | 72.2% | 49.2% |
+| Deja votes only, learning from every call | 74.4% | 72.2% | 49.2% |
 | Deja, learning from every call | 75.3% | 73.2% | 48.8% |
-| Past-task memory, successes only | 75.0% | 67.8% | 28.6% |
+| Deja votes only, successes only | 75.0% | 67.8% | 28.6% |
 | Deja, successes only | 76.0% | 68.4% | 26.3% |
 | **Deja, successes only + quarantine (served)** | 75.7% | 64.3% | 8.9% |
 | Deja, successes only + reliability penalty (dropped) | 69.5% | 56.8% | 5.8% |
@@ -131,7 +132,7 @@ never scored, except for one task in every 200 where it gets a trial, so a tool 
 which is close to what the rule removes, so the drop is partly by construction; and the every-called-tool number falls
 further, because quarantined tools that the agent still tried no longer appear.
 It no longer loads tools whose calls failed, so the every-called-tool number falls; both are reported. The graph keeps
-its lead over the memory-only baseline built the same way.
+its lead over votes only built the same way.
 
 ### Knowing when nothing fits
 
@@ -185,7 +186,7 @@ one edge and gives the `Catalog` node a new version; every read is filtered to t
 
 **Removing 10% of tools mid-stream** (3 seeds, tasks still answerable afterwards): reading the live catalog keeps 79.4% success, against 78.0% when trusting stale memory, which also spends 143 tokens per loadout on tools that no longer exist. Tool search: 40.6%.
 
-**When a removed tool has a near-twin that stays** (`subst_check.py`, 3 orderings, 10% of tools removed halfway, tasks after the removal that needed a removed tool with a live tool at cosine ≥ 0.80): Deja as served, which drops a removed tool's votes, loaded every needed tool or a substitute for 74.9–76.3%; passing the removed tool's votes to its closest live substitute (a `SUBSTITUTE` edge) gives 78.7–81.9%. Tool search: 44.1–44.7%. Memory-only gains almost as much (73.2–75.3% → 77.3–80.5%), so Deja's lead over it with substitutes is +1.37 points (95% CI +0.75 to +2.00): a real gain for the served model, not a graph-only one. Not shipped yet.
+**When a removed tool has a near-twin that stays** (`subst_check.py`, 3 orderings, 10% of tools removed halfway, tasks after the removal that needed a removed tool with a live tool at cosine ≥ 0.80): Deja as served, which drops a removed tool's votes, loaded every needed tool or a substitute for 74.9–76.3%; passing the removed tool's votes to its closest live substitute (a `SUBSTITUTE` edge) gives 78.7–81.9%. Tool search: 44.1–44.7%. Votes only gains almost as much (73.2–75.3% → 77.3–80.5%), so Deja's lead over it with substitutes is +1.37 points (95% CI +0.75 to +2.00): a real gain for the served model, not a graph-only one. Not shipped yet.
 
 **The same test through the server's loadout path** (`catalog_check.py`, the function behind `/api/loadout`): 20 tools removed while the server's catalog was warm were absent from both columns in 20/20 loadouts asked for right after the removal and 20/20 six seconds later; re-added, 20/20 came back. A reader (@webmcpx) spotted that the server cached the catalog for 5 s, so a removed tool could be served for up to 5 s after removal; this test failed on that version (14 of 20 still loaded the removed tool). Now every catalog write gives the `Catalog` node a new version, and the server re-reads the tool list whenever the version changes, whichever process made the change.
 
@@ -241,9 +242,9 @@ Every number above is "the right tools were in the loadout". To check that this 
 
 Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was better on 41 tasks and worse on 3, at the same prompt size. 2 of 398 requests failed on the provider's credit limit and count as misses for both. One model, one run, first tool call only: it shows the loadout changes what the agent does, not end-to-end task success. This check ran on the v4 loadouts, before step recall and the length penalty; it hasn't been re-run on v5.
 
-**Whole tasks in Claude Code** (`agent_bench.py`). Claude Code (`claude -p`, Opus 5.5, on a Claude Pro account) ran 192 held-out tasks to the end, three ways: with Deja's loadout, with the memory-only loadout, and with all 2,236 tools behind one MCP server so Claude Code defers them and Claude finds them with its own tool search. Tools aren't live: a stub server plays back each tool's output from the recorded run. Scored on whether Claude called every tool that worked in the recorded run, counting a call to a near-twin (tool-tool cosine ≥ 0.80; Toucan has the same tool on several servers) as covering it.
+**Whole tasks in Claude Code** (`agent_bench.py`). Claude Code (`claude -p`, Opus 5.5, on a Claude Pro account) ran 192 held-out tasks to the end, three ways: with Deja's loadout, with the votes-only loadout, and with all 2,236 tools behind one MCP server so Claude Code defers them and Claude finds them with its own tool search. Tools aren't live: a stub server plays back each tool's output from the recorded run. Scored on whether Claude called every tool that worked in the recorded run, counting a call to a near-twin (tool-tool cosine ≥ 0.80; Toucan has the same tool on several servers) as covering it.
 
-| | Deja | Memory only | Claude Code's tool search |
+| | Deja | Deja, votes only | Claude Code's tool search |
 |---|---|---|---|
 | Called every tool that worked (or a near-twin) | 82.3% | **83.9%** | 72.4% |
 | Same, exact tool name only | 62.0% | **63.0%** | 49.5% |
@@ -251,7 +252,7 @@ Paired: **+19.1 points (95% bootstrap CI +13.1 to +25.1)**; Deja's loadout was b
 | Input tokens per task | **23,635** | 23,772 | 304,105 |
 | Cost per task at API prices | $0.085 | **$0.080** | $0.545 |
 
-Paired over tasks: Deja vs Claude Code's tool search on calling every needed tool, +9.9 points, 95% CI +4.7 to +15.1; memory only vs tool search, +11.5 points, 95% CI +6.2 to +16.7; Deja vs memory only, -1.6 points, 95% CI -4.7 to +1.0. On the first call the gap over tool search is smaller and not significant (+3.1 points, 95% CI -2.1 to +8.3). A preloaded loadout gets Claude to the needed tools more often, at about a thirteenth of the input tokens (Claude Code's deferred-tool list carries every tool name on every turn), and Deja's graph adds nothing here over memory alone, matching the offline result. 7 of 199 tasks are left out because Opus 5.5's safeguards blocked at least one arm's run (false positives that persisted on retry). One model, one run, recorded outputs.
+Paired over tasks: Deja vs Claude Code's tool search on calling every needed tool, +9.9 points, 95% CI +4.7 to +15.1; votes only vs tool search, +11.5 points, 95% CI +6.2 to +16.7; Deja vs votes only, -1.6 points, 95% CI -4.7 to +1.0. On the first call the gap over tool search is smaller and not significant (+3.1 points, 95% CI -2.1 to +8.3). A preloaded loadout gets Claude to the needed tools more often, at about a thirteenth of the input tokens (Claude Code's deferred-tool list carries every tool name on every turn), and the graph hops add nothing here over the votes alone, matching the offline result: the memory is what wins. 7 of 199 tasks are left out because Opus 5.5's safeguards blocked at least one arm's run (false positives that persisted on retry). One model, one run, recorded outputs.
 
 ## Use it with your agent: the MCP proxy
 
@@ -284,7 +285,7 @@ DeepWiki: 58 tools). Two things the fixture test couldn't show, both now fixed:
 **Likely next tools.** When a call works, `deja_call`'s reply also carries full definitions of the tools learned to
 go with it (`CO` edges from the tools that worked, plus the task's original ranking), up to half the loadout budget per
 task. Offline (a reviewer's test, tasks after the first 400), topping up after the first calls beats loading the same
-budget up front by about 1.5 points, and by 7–9 on tasks whose first loadout was partly right; memory-only gets nearly
+budget up front by about 1.5 points, and by 7–9 on tasks whose first loadout was partly right; votes only gets nearly
 the same gain. In Claude Code, after one time-then-knowledge-graph task, a second such task got only the
 time tool in its first loadout, and after that call the top-up returned `memory-search_nodes` and
 `memory-create_entities`, the two tools Claude called next. Claude also calls tools from the one-line "also available"

@@ -37,7 +37,7 @@ for yy, val, lab, c in [(0.62, f"{mean('search', 'overall'):.0f}%", "hybrid tool
 save(f, "1_cover.png")
 
 # 2. Results: grouped horizontal bars
-methods = ["Tool search (vector)", "Tool search (hybrid)", "Deja v1 (no task memory)", "Past-task memory, no graph", "Deja"]
+methods = ["Tool search (vector)", "Tool search (hybrid)", "Deja v1 (no task memory)", "Deja, votes only", "Deja"]
 keys = ["vector", "search", "deja-v1", "knn", "deja"]
 allt = [mean(k, "overall") for k in keys]
 multi = [mean(k, "multi") for k in keys]
@@ -63,7 +63,7 @@ ax.tick_params(axis="y", length=0)
 ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, frameon=False, fontsize=11, labelcolor=T2)
 f.text(0.04, 0.92, "Every needed tool in the first loadout", fontsize=18, weight="bold")
 f.text(0.04, 0.855, "8,612 tasks · 2,000-token budget · mean of 4 stream orderings", fontsize=11, color=T3)
-f.text(0.04, 0.035, f"Memory of past tasks does most of the work. The HydraDB graph hops add {allt[4]-allt[3]:.1f} pts ({multi[4]-multi[3]:.1f} on multi-server tasks).",
+f.text(0.04, 0.035, f"Memory of past tasks does most of the work. Graph hops add {allt[4]-allt[3]:.1f} pts ({multi[4]-multi[3]:.1f} on multi-server tasks).",
        fontsize=10, color=T3)
 save(f, "2_results.png")
 
@@ -73,14 +73,14 @@ k = lambda v: f"{v/1000:.1f}".rstrip("0").rstrip(".") + "k" if v >= 1000 else st
 buckets = [f"{k(a)}–{k(b)}" for a, b in zip(e, e[1:])]
 cv = lambda m: [round(100 * v) for v in o1["curve"][m]]
 series = [("Tool search (hybrid)", cv("search"), T3, "--"), ("Deja v1", cv("deja-v1"), VIOLET, "-"),
-          ("Memory, no graph", cv("knn"), AQUA, "-"), ("Deja", cv("deja"), BLUE, "-")]
+          ("Deja, votes only", cv("knn"), AQUA, "-"), ("Deja", cv("deja"), BLUE, "-")]
 f = fig(10, 5.6)
 ax = f.add_axes([0.07, 0.14, 0.68, 0.66], facecolor=SURF)
 x = range(len(buckets))
 for name, ys, c, ls in series:
     lw = 3 if name == "Deja" else 2
     ax.plot(x, ys, ls, color=c, lw=lw, marker="o", ms=5, mec=SURF, mew=1.5, label=name)
-    ax.text(len(buckets) - 1 + 0.2, ys[-1] + (1.2 if name == "Deja" else -1.2 if name.startswith("Memory") else 0), f"{name}  {ys[-1]}%", va="center", fontsize=11,
+    ax.text(len(buckets) - 1 + 0.2, ys[-1] + (1.2 if name == "Deja" else -1.2 if name.startswith("Deja, votes") else 0), f"{name}  {ys[-1]}%", va="center", fontsize=11,
             color=T1 if name == "Deja" else T2, weight="bold" if name == "Deja" else "normal")
 ax.axvspan(-0.3, 3.5, color="#232321", zorder=0)
 ax.text(1.6, 77, "cold start", ha="center", fontsize=10, color=T3)

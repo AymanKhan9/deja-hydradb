@@ -11,29 +11,29 @@ rows = [("Tool search: vector (bge-small) over tool descriptions", "vector"), ("
         ("Tool search: hybrid, reciprocal-rank fusion of vector + BM25", "hybrid"),
         ("**Tool search: Deja's base alone** (cosine + 0.15 · BM25)", "search"), ("Load whole servers, vector-ranked", "servers"),
         ("Vector + learned popularity (non-graph learner)", "popularity"),
-        ("**Past-task memory, no graph** (same base; the 20 nearest past tasks to the task and to each of its steps vote)", "knn"),
+        ("**Deja, votes only** (same base; the 20 nearest past tasks to the task and to each of its steps vote for the tools they used; no graph hops)", "knn"),
         ("Deja v1, first shipped: word + co-use edges, no task memory", "deja-v1"),
         ("**Deja**: hybrid base + task and step memory in HydraDB + co-use hop + word hop", "deja"),
         ("Deja without word edges (ablation)", "deja-no-terms"), ("Deja without co-use edges (ablation)", "deja-no-couse")]
 main = "\n".join(f"| {n} | {rng(m, 'overall')} | {rng(m, 'multi')} |" for n, m in rows)
 O4 = [json.load(open("data/results_v4_2000.json"))["orders"][k] for k in ("dataset", "1", "2", "3")] if os.path.exists("data/results_v4_2000.json") else []
 r4 = lambda m, part: (lambda a, b: a if a == b else f"{a[:-1]}–{b}")(*(f"{100*x:.1f}%" for x in (min(o[part][m] for o in O4), max(o[part][m] for o in O4))))
-v4line = (f"| *v4 for reference (before step recall and the length penalty)*: tool search / memory-only / Deja | "
+v4line = (f"| *v4 for reference (before step recall and the length penalty)*: tool search / votes only / Deja | "
           f"{r4('search','overall')} / {r4('knn','overall')} / {r4('deja','overall')} | {r4('search','multi')} / {r4('knn','multi')} / {r4('deja','multi')} |") if O4 else ""
 main += "\n" + v4line
 SB = O[1].get("by_similarity", {})
-simtab = ("| Closest past task similarity | Tasks (shuffle 1) | Tool search | Memory-only | Deja | Deja's lead over tool search |\n|---|---|---|---|---|---|\n" + "\n".join(
+simtab = ("| Closest past task similarity | Tasks (shuffle 1) | Tool search | Votes only | Deja | Deja's lead over tool search |\n|---|---|---|---|---|---|\n" + "\n".join(
     f"| {k} | {v['n']:,} | {100*v['search']:.1f}% | {100*v['knn']:.1f}% | {100*v['deja']:.1f}% | +{100*(v['deja']-v['search']):.1f} |"
     for k, v in SB.items() if v["n"])) if SB else ""
 B = {b: json.load(open(f"data/results_v2_{b}.json"))["orders"]["1"]["overall"] for b in (1000, 2000, 4000) if os.path.exists(f"data/results_v2_{b}.json")}
 budget = "| token budget | " + " | ".join(f"{b:,}" for b in B) + " |\n|---|" + "---|" * len(B) + "\n" + "\n".join(
-    f"| {n} | " + " | ".join(f"{100*B[b][m]:.1f}%" for b in B) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja", "deja")))
+    f"| {n} | " + " | ".join(f"{100*B[b][m]:.1f}%" for b in B) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Deja, votes only", "knn"), ("Deja", "deja")))
 o1 = R["orders"]["1"]; e = o1["curve_edges"]
 _w = lambda m: (o1["curve"][m][0] * 50 + o1["curve"][m][1] * 50) / 100
 cold = f"{100*_w('deja'):.0f}% vs {100*_w('search'):.0f}%"
 cold_rel = "above" if _w('deja') - _w('search') > 0.02 else "below" if _w('search') - _w('deja') > 0.02 else "level with"
 curve = "| tasks already served | " + " | ".join(f"{a:,}–{b:,}" for a, b in zip(e, e[1:])) + " |\n|---|" + "---|" * (len(e) - 1) + "\n" + "\n".join(
-    f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, no graph", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
+    f"| {n} | " + " | ".join(f"{100*v:.0f}%" for v in o1["curve"][m]) + " |" for n, m in (("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Deja, votes only", "knn"), ("Deja v1", "deja-v1"), ("Deja", "deja")))
 kk = lambda x: f"{x/1000:.1f}".removesuffix(".0") + "k" if x >= 1000 else str(x)
 gp = [(a, b, round(100 * (d - sv))) for a, b, d, sv in zip(e, e[1:], o1["curve"]["deja"], o1["curve"]["search"])]
 first = next(x for i, x in enumerate(gp) if all(y[2] > 0 for y in gp[i:]))
@@ -52,18 +52,18 @@ om = lambda m, k: 100 * float(np.mean([OC[x][m][k] for x in OC]))
 outcome = "\n".join([
     "| | Every tool that worked loaded | Every called tool loaded | Loadout has a chronically broken tool |", "|---|---|---|---|"] +
     [f"| {n} | {om(m, 'succeeded'):.1f}% | {om(m, 'called'):.1f}% | {om(m, 'broken_tool_loaded'):.1f}% |" for n, m in (
-        ("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Past-task memory, learning from every call", "knn"),
-        ("Deja, learning from every call", "deja"), ("Past-task memory, successes only", "knn-ok"), ("Deja, successes only", "deja-ok"),
+        ("Tool search (vector)", "vector"), ("Tool search (Deja's base)", "search"), ("Deja votes only, learning from every call", "knn"),
+        ("Deja, learning from every call", "deja"), ("Deja votes only, successes only", "knn-ok"), ("Deja, successes only", "deja-ok"),
         ("**Deja, successes only + quarantine (served)**", "deja-ok+quar"),
         ("Deja, successes only + reliability penalty (dropped)", "deja-ok+pen")) if m in OC[next(iter(OC))]]) if OC else ""
 gain = lambda part: f"{100*np.mean([o[part]['deja'] - o[part]['knn'] for o in O]):.1f}"
 AN = json.load(open("data/analysis_v5.json")) if os.path.exists("data/analysis_v5.json") else {}
-ci = (f"Paired over shuffle 1, Deja minus memory-only is **+{100*AN['diff']:.2f} points (95% bootstrap CI {100*AN['ci95'][0]:+.2f} to "
+ci = (f"Paired over shuffle 1, Deja minus votes only is **+{100*AN['diff']:.2f} points (95% bootstrap CI {100*AN['ci95'][0]:+.2f} to "
       f"{100*AN['ci95'][1]:+.2f})**, and +{100*AN['diff_multi']:.2f} on multi-server tasks ({100*AN['ci95_multi'][0]:+.2f} to {100*AN['ci95_multi'][1]:+.2f}); "
-      f"Deja alone gets {AN['deja_only_wins']} tasks right that memory-only misses, against {AN['memory_only_wins']} the other way.") if AN else ""
-ci += ("\n\n**So the graph's own ranking gain is small, and further ranking ideas haven't widened it** (a session top-up and "
-       "substitute edges below both help memory-only nearly as much). The large gain is learned tool memory over tool search. "
-       "What the graph adds is that the memory, every call's outcome, the quarantine and the live catalog sit in one store "
+      f"Deja alone gets {AN['deja_only_wins']} tasks right that votes only misses, against {AN['memory_only_wins']} the other way.") if AN else ""
+ci += ("\n\n**So the graph hops' ranking gain is small, and further ranking ideas haven't widened it** (a session top-up and "
+       "substitute edges below both help votes only nearly as much). The large gain is learned tool memory over tool search. "
+       "What HydraDB adds is that the memory, every call's outcome, the quarantine and the live catalog sit in one store "
        "that the server, the learner and any number of planners read and write together: so loadouts carry a "
        "chronically broken tool far less often, a removed tool is never served, and new tasks are visible to every "
        "process as they are learned.")
@@ -94,23 +94,23 @@ if BN:
     d_, m_, s_ = (BN["arms"][a] for a in ("deja", "memory", "search")); P = BN["paired"]
     ci = lambda k: f"{100*P[k]['diff']:+.1f} points, 95% CI {100*P[k]['ci95'][0]:+.1f} to {100*P[k]['ci95'][1]:+.1f}"
     agent += (f"\n\n**Whole tasks in Claude Code** (`agent_bench.py`). Claude Code (`claude -p`, Opus 5.5, on a Claude Pro account) ran "
-              f"{BN['tasks']} held-out tasks to the end, three ways: with Deja's loadout, with the memory-only loadout, and with all "
+              f"{BN['tasks']} held-out tasks to the end, three ways: with Deja's loadout, with the votes-only loadout, and with all "
               f"2,236 tools behind one MCP server so Claude Code defers them and Claude finds them with its own tool search. "
               f"Tools aren't live: a stub server plays back each tool's output from the recorded run. Scored on whether Claude "
               f"called every tool that worked in the recorded run, counting a call to a near-twin (tool-tool cosine ≥ 0.80; "
               f"Toucan has the same tool on several servers) as covering it.\n\n"
-              f"| | Deja | Memory only | Claude Code's tool search |\n|---|---|---|---|\n"
+              f"| | Deja | Deja, votes only | Claude Code's tool search |\n|---|---|---|---|\n"
               f"| Called every tool that worked (or a near-twin) | {100*d_['all_worked_tools_called']:.1f}% | **{100*m_['all_worked_tools_called']:.1f}%** | {100*s_['all_worked_tools_called']:.1f}% |\n"
               f"| Same, exact tool name only | {100*d_['all_worked_tools_called_exact_name']:.1f}% | **{100*m_['all_worked_tools_called_exact_name']:.1f}%** | {100*s_['all_worked_tools_called_exact_name']:.1f}% |\n"
               f"| First tool call worked | {100*d_['first_call_worked']:.1f}% | **{100*m_['first_call_worked']:.1f}%** | {100*s_['first_call_worked']:.1f}% |\n"
               f"| Input tokens per task | **{d_['input_tokens']:,.0f}** | {m_['input_tokens']:,.0f} | {s_['input_tokens']:,.0f} |\n"
               f"| Cost per task at API prices | ${d_['cost_usd_notional']:.3f} | **${m_['cost_usd_notional']:.3f}** | ${s_['cost_usd_notional']:.3f} |\n\n"
               f"Paired over tasks: Deja vs Claude Code's tool search on calling every needed tool, {ci('all_ok_twin:deja-search')}; "
-              f"memory only vs tool search, {ci('all_ok_twin:memory-search')}; Deja vs memory only, {ci('all_ok_twin:deja-memory')}. "
+              f"votes only vs tool search, {ci('all_ok_twin:memory-search')}; Deja vs votes only, {ci('all_ok_twin:deja-memory')}. "
               f"On the first call the gap over tool search is smaller and not significant ({ci('first_ok_twin:deja-search')}). "
               f"A preloaded loadout gets Claude to the needed tools more often, at about a thirteenth of the input tokens "
-              f"(Claude Code's deferred-tool list carries every tool name on every turn), and Deja's graph adds nothing here over "
-              f"memory alone, matching the offline result. {len(BN['incomplete_tasks'])} of 199 tasks are left out because Opus 5.5's "
+              f"(Claude Code's deferred-tool list carries every tool name on every turn), and the graph hops add nothing here over "
+              f"the votes alone, matching the offline result: the memory is what wins. {len(BN['incomplete_tasks'])} of 199 tasks are left out because Opus 5.5's "
               f"safeguards blocked at least one arm's run (false positives that persisted on retry). One model, one run, recorded outputs.")
 KEY = "abstain_recall_unanswerable"
 def un_table():
@@ -155,7 +155,7 @@ if SC:
              f"tasks after the removal that needed a removed tool with a live tool at cosine ≥ 0.80): Deja as served, which "
              f"drops a removed tool's votes, loaded every needed tool or a substitute for {rng('Deja, filter (shipped)')}; passing "
              f"the removed tool's votes to its closest live substitute (a `SUBSTITUTE` edge) gives {rng('Deja + substitute')}. "
-             f"Tool search: {rng('tool search')}. Memory-only gains almost as much ({rng('memory-only, filter')} → "
+             f"Tool search: {rng('tool search')}. Votes only gains almost as much ({rng('memory-only, filter')} → "
              f"{rng('memory-only + substitute')}), so Deja's lead over it with substitutes is {100*sd['diff']:+.2f} points "
              f"(95% CI {100*sd['ci95'][0]:+.2f} to {100*sd['ci95'][1]:+.2f}): a real gain for the served model, not a graph-only one. "
              f"Not shipped yet.")
@@ -201,7 +201,7 @@ readme = f"""# Deja: learned tool loadouts for agents, on HydraDB
 
 Agents now sit in front of hundreds or thousands of MCP tools. Preloading them all burns the context window, and plain
 tool search over descriptions misses the tools a task *actually* ends up calling, especially the second server a task
-needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sharper with every task it serves.**
+needs. **Deja remembers, in a HydraDB graph, what past tasks needed, and gets sharper with every task it serves.** That memory (similar past tasks vote for the tools that worked for them) is what beats tool search: +9.9 points over Claude Code's own tool search on whole tasks, at a thirteenth of the tokens. The rest of the graph (word and co-use hops, failed calls, quarantine, the live catalog) adds about a point to ranking; its job is keeping that memory correct and shared as tools fail and change.
 
 ## Results
 
@@ -219,9 +219,10 @@ Metric: share of tasks where **every** tool the agent called was already in its 
 
 {held}
 
-**Read this table honestly.** Memory of past tasks does most of the work: a plain vector store of past tasks, with no
-graph, already gets most of the lift over tool search. The graph adds on top of that: Deja keeps the memory as
-`(:Task)-[:USED]->(:Tool)` in HydraDB and adds a word hop and a co-use hop, worth {gain('overall')} points overall and
+**Read this table honestly.** Memory of past tasks does most of the work. Deja keeps it in HydraDB as
+`(:Task)-[:USED]->(:Tool)`, and the 20 nearest past tasks vote for the tools they used. **Deja, votes only** is that
+memory alone, a one-step lookup, and it gets most of the lift over tool search. The full model adds two multi-step graph
+reads, a word hop and a co-use hop, worth {gain('overall')} points overall and
 {gain('multi')} on multi-server tasks (means over the 4 orderings; see the ablation rows for each hop). Our first shipped version (v1) had no task memory and lost to this baseline. A reviewer added the
 baseline, we reproduced it, and we rebuilt around it. The v1 row stays in the table.
 
@@ -234,10 +235,10 @@ v1. **v5 (from a reviewer's analysis, reproduced here):** each step of a multi-s
 recalls its own 20 nearest past tasks, which vote the same way, and a tool keeps its best step vote (weight 0.5, tried
 0.25–1.0); and every ranked method subtracts 0.05 · ln(tokens) so a long schema has to earn its space (tried 0.02–0.2).
 We dropped a step-to-tool cosine term that added 0.3 points on shuffle 1, to keep it simple. **Cold-start ramp:** memory's
-weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for memory-only too; 400 was best of
-50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **The memory-only baseline
-and tool search get the same changes** (step votes for memory-only, the length penalty for both), so the graph's gain is
-measured like for like; both changes lift memory-only nearly as much as Deja, which is why the graph's margin is smaller
+weights (task votes, step votes, both hops) scale with min(1, tasks learned / 400), for votes only too; 400 was best of
+50–1,600 on shuffle 1 (it ties 800), and it lifts the first 100 tasks on every ordering without changing anything after 400. **Votes only
+and tool search get the same changes** (step votes for votes only, the length penalty for both), so the graph's gain is
+measured like for like; both changes lift votes only nearly as much as Deja, which is why the hops' margin is smaller
 than in v4.
 
 {ci}
@@ -289,7 +290,7 @@ never scored, except for one task in every 200 where it gets a trial, so a tool 
 which is close to what the rule removes, so the drop is partly by construction; and the every-called-tool number falls
 further, because quarantined tools that the agent still tried no longer appear.
 It no longer loads tools whose calls failed, so the every-called-tool number falls; both are reported. The graph keeps
-its lead over the memory-only baseline built the same way.
+its lead over votes only built the same way.
 
 ### Knowing when nothing fits
 
@@ -406,7 +407,7 @@ DeepWiki: 58 tools). Two things the fixture test couldn't show, both now fixed:
 **Likely next tools.** When a call works, `deja_call`'s reply also carries full definitions of the tools learned to
 go with it (`CO` edges from the tools that worked, plus the task's original ranking), up to half the loadout budget per
 task. Offline (a reviewer's test, tasks after the first 400), topping up after the first calls beats loading the same
-budget up front by about 1.5 points, and by 7–9 on tasks whose first loadout was partly right; memory-only gets nearly
+budget up front by about 1.5 points, and by 7–9 on tasks whose first loadout was partly right; votes only gets nearly
 the same gain. In Claude Code, after one time-then-knowledge-graph task, a second such task got only the
 time tool in its first loadout, and after that call the top-up returned `memory-search_nodes` and
 `memory-create_entities`, the two tools Claude called next. Claude also calls tools from the one-line "also available"
